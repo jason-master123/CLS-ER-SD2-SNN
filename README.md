@@ -18,7 +18,7 @@ CLS-ER 的"学什么"                    SD²-SNN 的"用什么学"
 
 ## 结果速览（Seq-CIFAR-10，5 任务 × 2 类，buffer 500，单 seed）
 
-| 配置 | class-IL | task-IL | F_cil | 算力 | 相对基线 |
+| 配置 | class-IL | task-IL | F_cil | 算力 | 相对 SNN 基线 |
 |---|---|---|---|---|---|
 | ANN 口径（硬选择 + logit MSE + 只 EMA 参数） | 39.50 | 80.36 | 52.36 | — | −18.0 |
 | SNN 原生（软门控 + 率域 KL + 整状态 EMA） | 57.51 | 88.98 | 33.49 | 1.00× | — |
