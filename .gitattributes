@@ -1,0 +1,13 @@
+# 统一按二进制处理，避免 CRLF 转换破坏 PDF/docx
+*.pdf  binary
+*.docx binary
+*.pt   binary
+*.png  binary
+
+# 文本文件统一 LF（Windows 上检出时也不要改成 CRLF）
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# GitHub 语言统计：报告生成脚本不参与
+report/*.py linguist-documentation

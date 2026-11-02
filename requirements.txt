@@ -1,0 +1,11 @@
+# 训练与推理
+torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+
+# 报告生成（可选：只在重新生成 docx/pdf 时需要）
+python-docx>=1.0
+
+# 说明
+# - 全部实验在 Python 3.13 + CUDA 12.x 上完成，单张 8 GB 显卡即可（峰值显存 3.0–5.0 GB）
+# - 没有其他隐藏依赖；tests/smoke_test.py 只依赖 torch
