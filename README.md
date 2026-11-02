@@ -59,6 +59,10 @@ CLS-ER 的"学什么"                    SD²-SNN 的"用什么学"
 > "模式分离（齿状回）"见 [PS-SNN](https://link.springer.com/article/10.1038/s41598-026-42970-6)。
 > 因此本仓库定位为**复现与消融研究**，相关讨论见 §7e。
 
+**完整报告（19 页，含全部表格与归因）**：
+[`report/CLS-ER+SD2-SNN_研究报告.pdf`](report/CLS-ER%2BSD2-SNN_%E7%A0%94%E7%A9%B6%E6%8A%A5%E5%91%8A.pdf)
+（源文件 `.docx` 与生成脚本 `report/build_report.py` 同目录）
+
 ## 仓库结构
 
 ```
