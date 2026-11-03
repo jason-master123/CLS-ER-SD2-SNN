@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .neurons import LIFNode, RateMonitor
 
@@ -78,7 +79,8 @@ class SpikingResNet18(nn.Module):
                  detach_reset: bool = True, energy_layer: Optional[nn.Linear] = None,
                  readout: str = "rate", readout_norm: bool = True,
                  learnable_tau: bool = False, kwta_ratio: float = 0.0,
-                 kwta_expand: int = 1) -> None:
+                 kwta_expand: int = 1, fixed_head: str = "none",
+                 fixed_head_norm: bool = False, fixed_head_scale: float = 1.0) -> None:
         super().__init__()
         self.num_classes = num_classes
         self.img_size = img_size
@@ -110,6 +112,27 @@ class SpikingResNet18(nn.Module):
                              if (self.readout == "membrane" and readout_norm)
                              else nn.Identity())
 
+        # ---- PS-SNN style head: fixed, mutually orthogonal class centers -----
+        # "Most SNN-CL methods re-initialise the classifier at every step and
+        # optimise it on imbalanced data, which drifts the representation." A head
+        # that never moves removes that drift entirely: the backbone must align its
+        # features to a *fixed* set of orthogonal targets instead of chasing a
+        # moving decision boundary (PS-SNN, Sci. Rep. 2026).
+        self.fixed_head = str(fixed_head).lower()
+        self.fixed_head_norm = bool(fixed_head_norm)
+        self.fixed_head_scale = float(fixed_head_scale)
+        if self.fixed_head == "orthogonal":
+            if num_classes > code_dim:
+                raise ValueError(f"cannot place {num_classes} orthogonal centers "
+                                 f"in {code_dim} dims")
+            nn.init.orthogonal_(self.fc.weight)      # rows orthonormal, norm 1
+            with torch.no_grad():
+                self.fc.bias.zero_()
+            self.fc.weight.requires_grad_(False)
+            self.fc.bias.requires_grad_(False)
+        elif self.fixed_head != "none":
+            raise ValueError(f"unknown fixed_head {fixed_head!r}")
+
     def _make_layer(self, planes: int, blocks: int, stride: int, **lif_kw) -> nn.Sequential:
         layers: List[nn.Module] = []
         for s in [stride] + [1] * (blocks - 1):
@@ -118,6 +141,14 @@ class SpikingResNet18(nn.Module):
         return nn.Sequential(*layers)
 
     # ------------------------------------------------------------- forward
+    def classify(self, code: torch.Tensor) -> torch.Tensor:
+        """Apply the (optionally frozen, orthogonal) classifier to a code."""
+        if self.fixed_head == "orthogonal":
+            if self.fixed_head_norm:
+                code = F.normalize(code, dim=-1)
+            return self.fixed_head_scale * F.linear(code, self.fc.weight, self.fc.bias)
+        return self.fc(code)
+
     def _run_stages(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
         if not isinstance(self.downsample, nn.Identity):
@@ -154,7 +185,7 @@ class SpikingResNet18(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feats = self.features(x)          # (T, B, C)
         rate = self.features_to_code(feats)   # (B, C)  ← dentate-gyrus sparse code
-        return self.fc(rate)
+        return self.classify(rate)
 
     # ------------------------------------------------ dentate gyrus (k-WTA)
     def features_to_code(self, feats: torch.Tensor) -> torch.Tensor:
@@ -205,14 +236,14 @@ class SpikingResNet18(nn.Module):
         """
         feats = self.features(x)                     # (T, B, C)
         rate = self.features_to_code(feats)          # (B, code) — k-WTA applied here
-        logits = self.fc(rate)                       # (B, K)
+        logits = self.classify(rate)                 # (B, K)
         # per-timestep logits must go through the *same* DG pipeline, otherwise the
         # head sees a C-dim input while it expects r*C
         T, B, C = feats.shape
         flat = feats.reshape(-1, C)
         if self.dg is not None:
             flat = torch.relu(self.dg(flat))
-        logits_t = self.fc(flat).reshape(T, B, -1)   # (T, B, K)
+        logits_t = self.classify(flat).reshape(T, B, -1)   # (T, B, K)
         return logits, logits_t, feats
 
     def forward_with_rates(self, x: torch.Tensor,
@@ -249,4 +280,7 @@ def build_backbone(cfg):
         learnable_tau=getattr(cfg, "lif_learnable", False),
         kwta_ratio=getattr(cfg, "kwta_ratio", 0.0),
         kwta_expand=getattr(cfg, "kwta_expand", 1),
+        fixed_head=getattr(cfg, "fixed_head", "none"),
+        fixed_head_norm=getattr(cfg, "fixed_head_norm", False),
+        fixed_head_scale=getattr(cfg, "fixed_head_scale", 1.0),
     )

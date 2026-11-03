@@ -26,6 +26,7 @@ Quick smoke run on a subsampled stream (a few minutes on GPU)::
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -68,6 +69,23 @@ def default_name(cfg: HybridConfig) -> str:
     return "_".join(parts)
 
 
+def load_resume(path: str) -> dict:
+    """Load ``last.pt`` (+ ``progress.json``) so training can continue mid-stream."""
+    ckpt_path = os.path.join(path, "last.pt") if os.path.isdir(path) else path
+    if not os.path.exists(ckpt_path):
+        raise SystemExit(f"[resume] no checkpoint at {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    prog_path = os.path.join(os.path.dirname(ckpt_path), "progress.json")
+    if os.path.exists(prog_path):
+        with open(prog_path) as f:
+            prog = json.load(f)
+        ckpt.setdefault("history", prog.get("history", []))
+        ckpt.setdefault("cil", prog.get("cil_matrix", []))
+        ckpt.setdefault("til", prog.get("til_matrix", []))
+        ckpt.setdefault("elapsed_s", prog.get("elapsed_s", 0.0))
+    return ckpt
+
+
 def main() -> int:
     cfg = parse()
     if cfg.device.startswith("cuda") and not torch.cuda.is_available():
@@ -86,7 +104,8 @@ def main() -> int:
     cfg.num_classes = max(c for task in tasks for c in task.classes) + 1
     cfg.classes_per_task = len(tasks[0].classes)
     model = SpikingCLSER(cfg)
-    trainer = Trainer(cfg, model, tasks)
+    resume = load_resume(cfg.resume) if cfg.resume else None
+    trainer = Trainer(cfg, model, tasks, resume=resume)
     final = trainer.fit()
 
     print("\n=== summary ===")

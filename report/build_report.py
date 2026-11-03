@@ -234,6 +234,11 @@ def build() -> str:
                 f"（task-IL {r('snn_plif_t8')['final']['til_acc']:.2f}，F_cil "
                 f"{r('snn_plif_t8')['final']['forgetting_cil']:.2f}），比基线高 5.22 点，"
                 f"与稠密 ANN 的差距从 8.05 缩到 **2.83**。")
+    bullet(doc, f"**同算力下最好的改动是固定正交分类头（§8f）**："
+                f"{r('snn_pshead')['final']['cil_acc']:.2f}（+3.86），算力与基线持平；"
+                f"但它与 PLIF+T=8 负交互——三者全开只有 "
+                f"{r('snn_all3')['final']['cil_acc']:.2f}，低于 PLIF+T=8 的 "
+                f"{r('snn_plif_t8')['final']['cil_acc']:.2f}。")
     bullet(doc, "**八条“减少遗忘”的路线全部为零或负**：logit 校准（三变体）、NCM 换头（+2.1，边际）、"
                 "特征原型约束（六组）、1:1 回放（−9.1）、一致性权重上调（−5.0）、"
                 "稳态阈值校准（−0.25）、T=8（+1.29 但 2 倍算力）、膜电位读出（+0.45）。")
@@ -676,6 +681,46 @@ def build() -> str:
               "代价只有 2.83 点。这同时说明前面那些“改机制”的尝试之所以无效，"
               "并不是任务本身无解，而是**改错了地方**：瓶颈在基底的训练动力学，不在持续学习的约束。",
          indent_first=True)
+
+    # ---------------------------------------------------- fixed orthogonal head
+    doc.add_page_break()
+    heading(doc, "8f  固定正交分类头：同算力下最好，但与 PLIF+T=8 负交互", level=2)
+    para(doc, "PS-SNN（Sci. Rep. 2026）的论点是：多数 SNN-CL 方法每个任务随机初始化分类头并用"
+              "不平衡数据优化它，导致表征漂移；把可学习头换成**预先定义、固定、两两正交的类中心**"
+              "就提供了稳定目标。实现只需两行：`nn.init.orthogonal_(fc.weight)` 后"
+              "`requires_grad_(False)`（`parameter_groups` 会自动跳过它，连权重衰减都碰不到）。",
+         indent_first=True)
+
+    ps = r("snn_pshead")["final"]
+    all3 = r("snn_all3")["final"]
+    table(doc, ["配置", "class-IL", "task-IL", "F_cil", "算力", "相对基线"], [
+        ["基线", f"{snn['cil_acc']:.2f}", f"{snn['til_acc']:.2f}",
+         f"{snn['forgetting_cil']:.2f}", "1.00×", "—"],
+        ["**固定正交头**", f"**{ps['cil_acc']:.2f}**", f"{ps['til_acc']:.2f}",
+         f"{ps['forgetting_cil']:.2f}", "**0.98×**",
+         f"**+{ps['cil_acc'] - snn['cil_acc']:.2f}**"],
+        ["三者全开（+PLIF+T=8）", f"{all3['cil_acc']:.2f}", f"{all3['til_acc']:.2f}",
+         f"{all3['forgetting_cil']:.2f}", "2.2×",
+         f"+{all3['cil_acc'] - snn['cil_acc']:.2f}"],
+        ["（参考）PLIF+T=8", f"{both['cil_acc']:.2f}", f"{both['til_acc']:.2f}",
+         f"{both['forgetting_cil']:.2f}", "2.10×",
+         f"+{both['cil_acc'] - snn['cil_acc']:.2f}"],
+    ], widths=[4.4, 2.4, 2.4, 2.2, 1.8, 2.2], size=9, highlight_rows=(1,),
+        caption_text="表 12i  固定正交头及其与 PLIF+T=8 的组合")
+
+    bullet(doc, "逐检查点（固定头）：96.7 / 82.2 / 64.9 / 59.1 / 61.4 —— **五个任务全部优于基线**，"
+                "且算力与基线持平（106 vs 108 分钟）。这是本项目性价比最高的一次改动。")
+    bullet(doc, "**一个必须记录的弯路**：第一版照论文做 L2 归一化 + 余弦（s·cos），完全学不动"
+                "（CE 卡在 log 10，预测恒为均匀）。原因是**放电率特征全部非负，而正交中心有正有负**，"
+                "cos 被共同的正向分量主导，各类 logits 几乎相同。论文的设定里特征可正可负，"
+                "直接搬过来不成立。现在 `--fixed-head-norm` 默认为 False。")
+    bullet(doc, "**负交互**：固定头 +3.86、PLIF+T=8 +5.22，相加本应 66.6，三者全开却只有 "
+                f"**{all3['cil_acc']:.2f}**（低于 PLIF+T=8 的 {both['cil_acc']:.2f}）。"
+                "掉的是中间任务（t1 −4.5、t2 −7.65），两头反而更好。")
+    para(doc, "机制解释：两个改动治的是**同一个病**。当特征已经足够稳定（T=8 + 可学习 τ），"
+              "冻结边界不再有额外好处，反而阻止边界跟随改善后的特征。"
+              "**实用结论**：算力受限用固定头（+3.86，零额外算力）；追求精度用 PLIF+T=8"
+              "（+5.22，2.1× 算力）。", indent_first=True)
 
     # ------------------------------------------------------------- engineering
     doc.add_page_break()

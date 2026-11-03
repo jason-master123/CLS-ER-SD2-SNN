@@ -1009,6 +1009,79 @@ def test_dg_expansion():
           f"4x expansion (both ~5% sparse), +{extra / 1e3:.0f}k params")
 
 
+def test_fixed_orthogonal_head():
+    """PS-SNN head: unit-norm orthogonal centers that never move."""
+    from clser_snn.backbone import build_backbone
+
+    net = build_backbone(make_cfg(width=32, num_classes=6, fixed_head="orthogonal"))
+    W = net.fc.weight.detach()
+    assert W.shape == (6, 256), W.shape
+    gram = W @ W.t()
+    assert torch.allclose(gram, torch.eye(6), atol=1e-5), gram           # orthonormal
+    assert not net.fc.weight.requires_grad and not net.fc.bias.requires_grad
+
+    x = torch.randn(4, 5, 3, 32, 32)
+    logits = net(x)
+    assert logits.shape == (5, 6) and torch.isfinite(logits).all()
+
+    # cosine mode: logits are bounded by the temperature. It is *off by default*
+    # because rate features are non-negative: cos against mixed-sign centers is
+    # dominated by the mean direction, and the net stalls at uniform predictions
+    # (measured CE ~= log 10 on task 0). Here we only check the bound holds.
+    cos_net = build_backbone(make_cfg(width=32, num_classes=6, fixed_head="orthogonal",
+                                      fixed_head_norm=True, fixed_head_scale=2.0))
+    cos_logits = cos_net(x)
+    assert cos_logits.abs().max() <= 2.0 * (1 + 1e-4), cos_logits.abs().max()
+
+    logits.sum().backward()
+    assert net.fc.weight.grad is None                     # no gradient for the head
+    conv = [p for p in net.parameters() if p.dim() == 4 and p.grad is not None]
+    assert conv and any(float(p.grad.abs().sum()) > 0 for p in conv)
+
+    before = W.clone()
+    opt = torch.optim.SGD([p for p in net.parameters() if p.requires_grad], lr=0.5)
+    opt.step()
+    assert torch.allclose(net.fc.weight.detach(), before)  # unchanged after a step
+
+    from clser_snn.model import SpikingCLSER
+    cfg = make_cfg(fixed_head="orthogonal", width=32)
+    model = SpikingCLSER(cfg)
+    opt_ids = {id(p) for g in model.opt.param_groups for p in g["params"]}
+    assert id(model.net.fc.weight) not in opt_ids
+    out = model.observe(torch.randn(8, 3, 32, 32), torch.randint(0, 4, (8,)),
+                        torch.randn(8, 3, 32, 32))
+    assert torch.isfinite(torch.tensor(out["loss"]))
+    print(f"  ok  fixed orthogonal head: 6 orthonormal centers in 256-d, frozen, "
+          f"excluded from the optimizer (|logit| <= {net.fixed_head_scale:g})")
+
+
+def test_resume_plumbing():
+    """A checkpoint must restore the model, the accuracy matrices and the task cursor."""
+    from types import SimpleNamespace
+
+    from clser_snn.model import SpikingCLSER as _Model
+    from clser_snn.trainer import Trainer
+
+    cfg = make_cfg(width=8, num_classes=10)
+    model = _Model(cfg)
+    ckpt = {"model": model.state_dict(), "cfg": cfg.to_dict(),
+            "cil": [[95.0], [80.0, 84.0]], "til": [[95.0], [90.0, 92.0]],
+            "history": [{"task": 0}, {"task": 1}], "task": 1, "elapsed_s": 123.0}
+    tasks = [SimpleNamespace(classes=[2 * i, 2 * i + 1]) for i in range(5)]
+
+    fresh = _Model(cfg)
+    tr = Trainer(cfg, fresh, tasks, resume=ckpt)
+    assert tr.start_task == 2, tr.start_task        # two tasks done -> continue at #2
+    assert tr.seen_classes == [0, 1, 2, 3], tr.seen_classes
+    assert len(tr.cil_matrix) == 2 and tr.cil_matrix[1] == [80.0, 84.0]
+    assert tr.elapsed_offset == 123.0
+    # the restored weights really are the checkpoint's
+    for a, b in zip(fresh.net.parameters(), model.net.parameters()):
+        assert torch.equal(a, b)
+    print("  ok  resume: task cursor, seen classes, accuracy matrices and weights "
+          "all restored from the checkpoint")
+
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     print("running CLS-ER + SD^2-SNN smoke tests ...")
@@ -1057,4 +1130,8 @@ if __name__ == "__main__":
     print("[J] dentate gyrus (k-WTA pattern separation)")
     test_kwta_pattern_separation()
     test_dg_expansion()
+    print("[K] fixed orthogonal head (PS-SNN)")
+    test_fixed_orthogonal_head()
+    print("[L] checkpoint / resume")
+    test_resume_plumbing()
     print("all smoke tests passed")

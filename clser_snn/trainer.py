@@ -21,7 +21,7 @@ from .metrics import evaluate_task, summarise
 
 
 class Trainer:
-    def __init__(self, cfg, model, tasks: List[Task]) -> None:
+    def __init__(self, cfg, model, tasks: List[Task], resume: Optional[dict] = None) -> None:
         self.cfg = cfg
         self.model = model
         self.tasks = tasks
@@ -38,6 +38,25 @@ class Trainer:
         self.til_matrix: List[List[float]] = []
         self.history: List[dict] = []
         self.seen_classes: List[int] = []
+        self.start_task = 0
+        self.elapsed_offset = 0.0
+        self._t0: Optional[float] = None
+
+        # ---- resume from a checkpoint written after a completed task --------
+        # ``last.pt`` holds the model (net + both memories + buffer + calibrator +
+        # prototypes) and the accuracy matrices; ``progress.json`` holds the history.
+        # Resuming therefore never re-trains a finished task.
+        if resume:
+            self.model.load_state_dict(resume["model"])
+            self.cil_matrix = [list(r) for r in resume.get("cil", [])]
+            self.til_matrix = [list(r) for r in resume.get("til", [])]
+            self.history = list(resume.get("history", []))
+            self.start_task = int(resume.get("task", -1)) + 1
+            self.seen_classes = [c for t in self.tasks[:self.start_task] for c in t.classes]
+            self.elapsed_offset = float(resume.get("elapsed_s", 0.0))
+            print(f"[resume] restored after task {self.start_task - 1}; "
+                  f"continuing at task {self.start_task}/{len(self.tasks)} "
+                  f"(seen classes {self.seen_classes})", flush=True)
 
         self.run_dir = os.path.join(cfg.output_dir, cfg.run_name) if cfg.run_name else cfg.output_dir
         os.makedirs(self.run_dir, exist_ok=True)
@@ -182,8 +201,10 @@ class Trainer:
               f"proximal={cfg.proximal_weight}, calibrate={cfg.calibrate}, "
               f"replay_encoding={cfg.replay_encoding}")
 
-        t0 = time.time()
+        t0 = self._t0 = time.time()
         for k, task in enumerate(self.tasks):
+            if k < self.start_task:
+                continue
             print(f"\n===== task {k}: classes {task.classes} "
                   f"(train={len(task.train)}, test={len(task.test)}) =====", flush=True)
             if getattr(cfg, "calibrate", False):
@@ -199,7 +220,8 @@ class Trainer:
 
             summary = self.evaluate_all(k)
             record = {"task": k, "classes": task.classes, "train": stats, "eval": summary,
-                      "post": info, "elapsed_s": round(time.time() - t0, 1)}
+                      "post": info,
+                      "elapsed_s": round(time.time() - t0 + self.elapsed_offset, 1)}
             self.history.append(record)
             print(f"[eval after task {k}] class-IL={summary['cil_acc']:.2f} "
                   f"task-IL={summary['til_acc']:.2f} F_cil={summary['forgetting_cil']:.2f} "
@@ -232,7 +254,11 @@ class Trainer:
                     "cil": self.cil_matrix, "til": self.til_matrix,
                     "task": record["task"]},
                    os.path.join(self.run_dir, "last.pt"))
+        elapsed = (time.time() - self._t0 + self.elapsed_offset
+                   if self._t0 is not None else self.elapsed_offset)
         with open(os.path.join(self.run_dir, "progress.json"), "w") as f:
             json.dump({"tasks_done": len(self.history), "n_tasks": len(self.tasks),
                        "cil_matrix": self.cil_matrix, "til_matrix": self.til_matrix,
-                       "history": self.history}, f, indent=2, default=float)
+                       "history": self.history,
+                       "elapsed_s": round(elapsed, 1)},
+                      f, indent=2, default=float)

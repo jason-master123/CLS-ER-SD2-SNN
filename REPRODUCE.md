@@ -37,6 +37,18 @@ python tests/smoke_test.py          # 35 项自检，CPU，< 3 分钟
 | `snn_dg4` | 57.41 | 88.89 | 170 min | `--kwta-ratio 0.05 --kwta-expand 4` |
 | `snn_cal` | 57.26 | 88.48 | 148 min | `--calibrate` |
 | `snn_r32`（1:1 回放） | 48.43 | 89.84 | 151 min | `--minibatch-size 32` |
+| `snn_pshead`（固定正交头） | **61.37** | 90.22 | 106 min | `--fixed-head orthogonal` |
+| `snn_all3`（三者全开） | 61.73 | 90.83 | ~241 min | `--fixed-head orthogonal --lif-learnable --time-steps 8` |
+
+> `snn_all3` 是分两次跑完的（中途暂停 + `--resume`），所以 `results.json` 里的 `elapsed_s`
+> 只统计了后半程；真实总时长约 241 分钟。暂停与续跑：
+
+```bash
+# 暂停：停掉进程即可（每个任务结束都会写 last.pt）
+# 续跑：参数必须与原命令一致，tag 也要相同
+python scripts/train.py ... --tag snn_all3 --resume runs/seq_cifar10_T8_w32_buf500_snn_all3
+# 首行应输出 [resume] restored after task N; continuing at task N+1/5
+```
 
 基线命令：
 

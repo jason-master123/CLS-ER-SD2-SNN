@@ -83,6 +83,9 @@ class CosineHead(nn.Module):
 
 def install_cosine_head(model, scale: float = 10.0) -> bool:
     """Replace ``model.net.fc`` with a :class:`CosineHead` (idempotent)."""
+    if str(getattr(model.net, "fixed_head", "none")).lower() == "orthogonal":
+        raise ValueError("--cosine-head and --fixed-head orthogonal both replace the "
+                         "classifier; enable only one of them")
     fc = getattr(model.net, "fc", None)
     if fc is None or isinstance(fc, CosineHead):
         return False

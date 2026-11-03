@@ -43,6 +43,12 @@ class HybridConfig:
     lif_learnable: bool = False         # PLIF：每层可学习的膜时间常数（ICCV'21）
     kwta_ratio: float = 0.0             # 齿状回模式分离：保留 top-k% 特征（0 关闭）
     kwta_expand: int = 1                # 齿状回扩张倍数（>1 时先 C→r·C 再稀疏）
+    fixed_head: str = "none"            # none | orthogonal（PS-SNN：固定正交类中心）
+    # 注意：L2 归一化（余弦）在脉冲网上是退化的——放电率特征全部非负，而正交中心
+    # 有正有负，cos 值被"均值方向"主导，各类 logits 几乎相同（实测 CE 卡在 log(10)）。
+    # 因此默认关闭归一化：固定头直接作用在未归一化的码上。
+    fixed_head_norm: bool = False
+    fixed_head_scale: float = 1.0       # 余弦模式下才有意义（10~30），非归一化时保持 1
     readout: str = "rate"               # rate（时间平均放电率）| membrane（末层膜电位）
     readout_norm: bool = True           # 膜电位读出时加 LayerNorm
     amp: bool = False                   # bf16 autocast (fp16 unsafe for this net)
@@ -134,6 +140,7 @@ class HybridConfig:
     save_ckpt: bool = True
     log_every: int = 10                 # epochs between console lines
     stop_after_task: int = 0
+    resume: str = ""                    # 从 runs/<tag> 的 last.pt 继续训练（跳过已完成的任务）
 
     def resolved(self) -> "HybridConfig":
         if getattr(self, "_resolved", False):
