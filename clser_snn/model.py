@@ -225,15 +225,33 @@ class SpikingCLSER(nn.Module):
                 weights = w_sel.clamp_min(1e-3)
                 l_cons = (dist * weights).sum() / weights.sum()
 
-                # SNN 改造 4：时序蒸馏（逐 timestep，ANN 无此维度）
+                # SNN 改造 4：时序蒸馏（逐时刻 KL + soft-DTW 轨迹对齐）
                 if getattr(cfg, "temporal_weight", 0.0) > 0:
-                    t_logits_t = self.memories.stable_temporal(encode_direct(buf_x, T))
-                    s_logits_t = logits_t_all[:, n_stream:]
+                    mode = str(getattr(cfg, "temporal_mode", "step")).lower()
+                    s_logits_t = logits_t_all[:, n_stream:]          # (T, B, K)
                     tau = max(1e-3, cfg.temporal_tau)
-                    p_t = F.softmax(t_logits_t.detach() / tau, dim=-1).clamp_min(1e-8)
-                    log_p_s = F.log_softmax(s_logits_t / tau, dim=-1)
-                    kl_t = (p_t * (p_t.log() - log_p_s)).sum(-1) * (tau * tau)   # (T, B)
-                    l_temp = kl_t.mean()
+                    terms = []
+                    if mode in ("step", "both"):
+                        t_logits_t = self.memories.stable_temporal(encode_direct(buf_x, T))
+                        p_t = F.softmax(t_logits_t.detach() / tau, dim=-1).clamp_min(1e-8)
+                        log_p_s = F.log_softmax(s_logits_t / tau, dim=-1)
+                        kl_t = (p_t * (p_t.log() - log_p_s)).sum(-1) * (tau * tau)   # (T, B)
+                        terms.append(kl_t.mean())
+                    if mode in ("dtw", "both"):
+                        # 同一批回放图像在**另一个时间分辨率**下的记忆轨迹；soft-DTW
+                        # 允许学生的证据整体早/晚出现，只惩罚形状不符（时间平移不算遗忘）
+                        from .temporal import temporal_alignment_loss
+                        gamma = float(getattr(cfg, "temporal_gamma", 1.0))
+                        scales = [float(s) for s in
+                                  str(getattr(cfg, "temporal_scales", "0.5")).split(",") if s.strip()]
+                        student_traj = s_logits_t.permute(1, 0, 2)   # (B, T, K)
+                        for scale in scales:
+                            T2 = max(2, int(round(T * scale)))
+                            teacher2 = self.memories.stable_temporal(encode_direct(buf_x, T2))
+                            teacher_traj = teacher2.detach().permute(1, 0, 2)   # (B, T2, K)
+                            terms.append(temporal_alignment_loss(student_traj, teacher_traj, gamma))
+                    if terms:
+                        l_temp = torch.stack(terms).mean()
 
             loss = l_ce + cfg.reg_weight * l_cons
             if getattr(cfg, "temporal_weight", 0.0) > 0:

@@ -77,6 +77,12 @@ class HybridConfig:
     # 4) temporal distillation over the T timesteps (impossible in an ANN)
     temporal_weight: float = 0.0         # 0 disables
     temporal_tau: float = 2.0
+    #   step：逐时刻 KL（要求同一时刻对齐）
+    #   dtw ：soft-DTW 轨迹对齐（允许时间平移，STAER 的思路）
+    #   both：两者相加
+    temporal_mode: str = "step"          # step | dtw | both
+    temporal_scales: str = "1.0"         # 相对 T 的其它时间尺度，逗号分隔（1.0 = 同长度对齐）
+    temporal_gamma: float = 1.0          # soft-DTW 的软化程度
     # 5) proximal consolidation towards the stable memory in parameter space
     proximal_weight: float = 0.0         # 0 disables
     # 6) replay coding: same direct encoding as the stream, or stochastic

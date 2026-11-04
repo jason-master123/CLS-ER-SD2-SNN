@@ -1082,6 +1082,48 @@ def test_resume_plumbing():
           "all restored from the checkpoint")
 
 
+def test_temporal_alignment():
+    """Soft-DTW must tolerate re-timing but punish content change."""
+    from clser_snn.temporal import resample_logits, soft_dtw, temporal_alignment_loss
+
+    torch.manual_seed(0)
+    x = torch.randn(4, 4, 10) * 3.0
+    shifted = torch.cat([x[:, :1], x[:, :-1]], dim=1)   # same content, one step late
+    other = torch.randn(4, 4, 10) * 3.0
+
+    assert soft_dtw(x, x).abs().max() < 1e-4                       # identity
+    d_shift = float(soft_dtw(x, shifted).mean())
+    d_other = float(soft_dtw(x, other).mean())
+    assert d_shift < d_other, (d_shift, d_other)                   # re-timing is cheap
+    assert d_other > 1.0 and d_shift >= 0.0
+
+    y2 = torch.randn(4, 2, 10) * 3.0                               # different length
+    assert torch.isfinite(soft_dtw(x, y2)).all()
+    train = x.clone().requires_grad_(True)
+    loss = temporal_alignment_loss(train, y2)
+    assert float(loss) >= 0.0
+    loss.backward()
+    assert train.grad is not None and float(train.grad.abs().sum()) > 0
+
+    assert torch.allclose(resample_logits(x, 4), x)
+    assert resample_logits(x, 8).shape == (4, 8, 10)
+
+    from clser_snn.config import HybridConfig
+    from clser_snn.model import SpikingCLSER
+    for mode in ("step", "dtw"):
+        cfg = HybridConfig(dataset="seq_cifar10", device="cpu", width=8, num_classes=4,
+                           n_tasks=2, classes_per_task=2, temporal_weight=0.5,
+                           temporal_mode=mode)
+        m = SpikingCLSER(cfg)
+        xx = torch.randn(8, 3, 32, 32)
+        yy = torch.randint(0, 4, (8,))
+        for _ in range(4):
+            out = m.observe(xx, yy, xx)
+        assert torch.isfinite(torch.tensor(out["loss"]))
+        assert out.get("temp", 0.0) >= 0.0, (mode, out.get("temp"))
+    print(f"  ok  temporal alignment: shift cost {d_shift:.2f} << content cost "
+          f"{d_other:.2f}, non-negative loss, gradients flow, both modes wired")
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     print("running CLS-ER + SD^2-SNN smoke tests ...")
@@ -1134,4 +1176,6 @@ if __name__ == "__main__":
     test_fixed_orthogonal_head()
     print("[L] checkpoint / resume")
     test_resume_plumbing()
+    print("[M] temporal alignment (soft-DTW)")
+    test_temporal_alignment()
     print("all smoke tests passed")
