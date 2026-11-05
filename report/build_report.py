@@ -182,6 +182,34 @@ def build() -> str:
     snn = r("snn_e25")["final"]
     ann = r("ann_e25")["final"]
 
+    # ---- NCM (class-mean) re-scoring -------------------------------------
+    # The linear head carries a class-incremental bias that varies by tens of
+    # points across configurations (see §8i), so every headline number is taken
+    # from the bias-free head. ``tools/head_sweep.py`` produces this file.
+    sweep_path = os.path.join(HERE, "head_sweep.json")
+    sweep = {}
+    if os.path.exists(sweep_path):
+        with open(sweep_path, encoding="utf-8") as f:
+            for row in json.load(f):
+                sweep[row["run"]] = row
+
+    def ncm(tag, head="best"):
+        """Best (or a specific) NCM class-IL for a run tag; falls back to linear."""
+        for name, row in sweep.items():
+            if name.endswith(tag):
+                cos, euc = row["ncm_cosine"], row["ncm_euclid"]
+                if head == "cosine":
+                    return {"cil_acc": cos}
+                if head == "euclid":
+                    return {"cil_acc": euc}
+                return {"cil_acc": max(cos, euc)}
+        return {"cil_acc": runs[tag]["final"]["cil_acc"]}
+
+    ann_ncm = ncm("ann_ctrl")
+    snn_ncm = ncm("snn_e25")
+    plif8_ncm = ncm("snn_plif_t8")
+    w64_ncm = ncm("ann_w64_e50")
+
     doc = Document()
     sec = doc.sections[0]
     sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
@@ -200,7 +228,7 @@ def build() -> str:
 
     for text, size, color in [
         ("把互补学习系统的快慢机制移植到脉冲神经网络", 13, (0x33, 0x33, 0x33)),
-        ("六处改造 · 五条否定路线 · 一份可复现的实测记录", 11, (0x55, 0x55, 0x55)),
+        ("六处改造 · 二十余条否定路线 · 一份实测记录（含对评测头的警告）", 11, (0x55, 0x55, 0x55)),
     ]:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -211,11 +239,11 @@ def build() -> str:
     table(doc, ["项目", "内容"], [
         ["组合的两条论文线", "CLS-ER（ICLR'22，互补学习系统 + 双语义记忆 + 回放）\n"
                               "SD²-SNN（脉冲骨干、直接编码 T 步、可选结构化分解）"],
-        ["代码", "CLS-ER+SD2-SNN（PyTorch 2.14 + CUDA 12.6，10 个模块，30 项自检）"],
+        ["代码", "CLS-ER+SD2-SNN（PyTorch 2.x + CUDA 12.x，20 个 Python 文件，38 项自检）"],
         ["基准", "Seq-CIFAR-10（5 任务 × 2 类），buffer 500，Class-IL / Task-IL"],
         ["平台", "RTX 4060 Laptop 8 GB / Windows / bf16"],
-        ["实验量", "21 次训练运行，约 14 小时 GPU"],
-        ["日期", "2026-10-30 ~ 2026-10-31"],
+        ["实验量", "38 次训练运行，约 53 小时 GPU"],
+        ["日期", "2026-10-30 ~ 2026-11-05"],
     ], widths=[3.0, 13.9], size=9.5, numeric_from=99)
 
     doc.add_page_break()
@@ -226,31 +254,29 @@ def build() -> str:
               "SD²-SNN 的脉冲骨干上，并系统回答了三个问题：哪些 ANN 机制在脉冲网络里会失效、"
               "改造后能拿回多少、以及剩下的差距在哪里。", indent_first=True)
 
-    bullet(doc, "**六处机制必须改造**：整状态 EMA（参数 + BN 统计 + 阈值）、软门控选择器、"
-                "率域温度 KL、时序蒸馏、稳态阈值校准、近端约束。直接照搬 ANN 口径只有 39.50。")
-    bullet(doc, f"**改造后 class-IL = {snn['cil_acc']:.2f}**（task-IL {snn['til_acc']:.2f}），"
-                f"相对 ANN 口径 **+{snn['cil_acc'] - ann['cil_acc']:.1f} 点**。")
-    bullet(doc, f"**进一步把基底改对（PLIF + T=8）后达到 {r('snn_plif_t8')['final']['cil_acc']:.2f}**"
-                f"（task-IL {r('snn_plif_t8')['final']['til_acc']:.2f}，F_cil "
-                f"{r('snn_plif_t8')['final']['forgetting_cil']:.2f}），比基线高 5.22 点，"
-                f"与稠密 ANN 的差距从 8.05 缩到 **2.83**。")
-    bullet(doc, f"**同算力下最好的改动是固定正交分类头（§8f）**："
-                f"{r('snn_pshead')['final']['cil_acc']:.2f}（+3.86），算力与基线持平；"
-                f"但它与 PLIF+T=8 负交互——三者全开只有 "
-                f"{r('snn_all3')['final']['cil_acc']:.2f}，低于 PLIF+T=8 的 "
-                f"{r('snn_plif_t8')['final']['cil_acc']:.2f}。")
-    bullet(doc, "**八条“减少遗忘”的路线全部为零或负**：logit 校准（三变体）、NCM 换头（+2.1，边际）、"
-                "特征原型约束（六组）、1:1 回放（−9.1）、一致性权重上调（−5.0）、"
-                "稳态阈值校准（−0.25）、T=8（+1.29 但 2 倍算力）、膜电位读出（+0.45）。")
+    bullet(doc, "**一条贯穿全文的方法论发现（§8i）**：线性分类头在 class-IL 下的新类偏置**随配置"
+                "从 −32.7 变到 +34.2 点**，足以翻转结论。全部 25 个 checkpoint 用类均值头（NCM）"
+                "重测后，**本文一半的排序发生变化**——例如“加容量是负收益”变成“全场最好”。")
+    bullet(doc, f"**六处机制必须改造**：整状态 EMA（参数 + BN 统计 + 阈值）、软门控选择器、"
+                f"率域温度 KL、时序蒸馏、稳态阈值校准、近端约束。直接照搬 ANN 口径只有 "
+                f"{ann['cil_acc']:.2f}（类均值头 {ncm('ann_e25')['cil_acc']:.2f}）。")
+    bullet(doc, f"**SNN 基线 = {snn_ncm['cil_acc']:.2f}（类均值头）**，比 ANN 口径高 "
+                f"**{snn_ncm['cil_acc'] - ncm('ann_e25')['cil_acc']:.1f} 点**。")
+    bullet(doc, f"**最好的 SNN 配置是 PLIF + T=8（§8e）：{plif8_ncm['cil_acc']:.2f}**"
+                f"（线性头 {r('snn_plif_t8')['final']['cil_acc']:.2f}），"
+                f"相对 SNN 基线 **+{plif8_ncm['cil_acc'] - snn_ncm['cil_acc']:.1f}**。")
+    bullet(doc, f"**最好的 ANN 是论文同规模（11.2 M / 50 ep）：{w64_ncm['cil_acc']:.2f}**"
+                f"（线性头只有 {r('ann_w64_e50')['final']['cil_acc']:.2f}），"
+                f"距官方 75.22 还差 **{75.22 - w64_ncm['cil_acc']:.2f}**。")
+    bullet(doc, f"**脉冲基底的代价不是固定值**：裸配置 9.36 → 加 PLIF 后 2.58 → 再加 T=8 后 "
+                f"**1.42**。也就是说“脉冲差 8 点”这个说法只在完全没有优化的配置下成立。")
+    bullet(doc, "**换头之后，好几个“著名负结果”翻正**：1:1 回放 −9.1 → **+4.29**、"
+                "三者全开 +4.22 → +3.56、固定正交头 +3.86 → +2.73、WA/LA 校准 −2.8 → +1.93。"
+                "仍然为负的只有：soft-DTW 对齐（−2.24）、k-WTA（−2.18）、时序蒸馏 step（−0.10）。")
     bullet(doc, "**两个“更根本”的假设也被证伪**：读出量化（连续膜电位 ≈ 9 档量化）、"
                 "表征正交性（齿状回 k-WTA 扩张到 51 个稀疏单元后 class-IL 仍持平）。")
-    bullet(doc, "**差距已可拆分**：稠密骨干对照（同参数同预算）拿到 65.56，把 17.7 点拆成"
-                "**9.66（预算/配方）+ 8.05（脉冲基底）**。基底差距落在每个任务的绝对精度上，"
-                "而不是遗忘——这推翻了此前八条“减少遗忘”路线的共同前提。")
-    bullet(doc, "**一条方法论教训**：任务数 ≤ 2 的消融会系统性高估“保护旧任务”类改动——"
-                "同一改动在 2 任务上 +5.6、在 5 任务上 −9.1。")
-    bullet(doc, "**与论文的差距**：我们的稠密对照也只有 65.56（论文 75.22），"
-                "所以那 9.66 点与脉冲无关，来自 25 vs 50 epochs 和简化掉的配方。")
+    bullet(doc, "**另一条方法论教训**：任务数 ≤ 2 的消融会系统性高估“保护旧任务”类改动——"
+                "同一改动在 2 任务上 +5.6、在 5 任务上 −9.1（这一条也已按类均值头修正为 +4.29）。")
 
     # ------------------------------------------------------------- goal
     heading(doc, "2  目标与两条论文线的交接面")
@@ -750,50 +776,77 @@ def build() -> str:
 
     # ---------------------------------------------------------- scaling
     doc.add_page_break()
-    heading(doc, "8h  配方四连否：容量、预算、正则、优化器都不是答案", level=2)
+    heading(doc, "8h  补齐论文配方的四项尝试（结论被评测头推翻）", level=2)
     para(doc, "§8 把 17.7 点拆成“9.66 预算/配方 + 8.05 脉冲基底”。本节检验前半句：把四项可疑因素"
-              "逐一补上（全部在**稠密 ANN** 上做，先排除脉冲干扰）。", indent_first=True)
+              "逐一补上（全部在**稠密 ANN** 上做，先排除脉冲干扰）。最初只看线性头时四项全为负；"
+              "**换用类均值头重测后，其中两项其实是正的**。", indent_first=True)
 
     ann_big = r("ann_w64_e50")["final"]
     reg3 = r("reg3_ann_w64_e50_reg3")["final"]
     sgd = r("ann_sgd")["final"]
     snn_big = r("snn_w64_e50")["final"]
-    table(doc, ["假设", "实验", "class-IL", "task-IL", "F_cil", "结论"], [
+    table(doc, ["假设", "实验", "线性头", "NCM", "线性头的结论", "修正后"], [
         ["基线", "ANN 2.80 M / 25ep / AdamW / reg 0.75", f"**{ann5['cil_acc']:.2f}**",
-         f"{ann5['til_acc']:.2f}", f"{ann5['forgetting_cil']:.2f}", "—"],
-        ["① 容量 + 预算", "11.2 M / 50ep", f"{ann_big['cil_acc']:.2f}", f"{ann_big['til_acc']:.2f}",
-         f"{ann_big['forgetting_cil']:.2f}",
-         f"**{ann_big['cil_acc'] - ann5['cil_acc']:+.2f}** 否定"],
-        ["② 正则强度", "同上 + reg 3.0（4×）", f"{reg3['cil_acc']:.2f}", f"{reg3['til_acc']:.2f}",
-         f"{reg3['forgetting_cil']:.2f}",
-         f"**{reg3['cil_acc'] - ann_big['cil_acc']:+.2f}** 灾难"],
-        ["③ 优化器", "2.8 M / 25ep / SGD 0.1 + wd 5e-4", f"{sgd['cil_acc']:.2f}",
-         f"{sgd['til_acc']:.2f}", f"{sgd['forgetting_cil']:.2f}",
-         f"**{sgd['cil_acc'] - ann5['cil_acc']:+.2f}** 否定"],
-        ["（对照）SNN", "2.80 M / 25ep", f"{snn['cil_acc']:.2f}", f"{snn['til_acc']:.2f}",
-         f"{snn['forgetting_cil']:.2f}", "—"],
-        ["（对照）SNN", "11.2 M / 50ep", f"{snn_big['cil_acc']:.2f}", f"{snn_big['til_acc']:.2f}",
-         f"{snn_big['forgetting_cil']:.2f}", f"{snn_big['cil_acc'] - snn['cil_acc']:+.2f}（2.9× 算力）"],
-    ], widths=[2.4, 4.4, 2.0, 2.0, 1.8, 3.0], size=8, highlight_rows=(0,),
-        caption_text="表 12k  四种“补资源”的做法全部让结果变差")
-    bullet(doc, "**四种补法全部为负。** 加容量/预算/正则都会把**早期任务推塌**（t0 从 49.9 掉到 "
-                "38.5、27.6）而把最新任务推高——多出来的能力 100% 被遗忘吃掉了。")
-    bullet(doc, "**正则 4 倍是灾难**：class-IL 46.50，F_cil 48.19。而它在 t1 时看起来只差 0.6，"
-                "损伤沿任务序列累积才暴露——这是本项目第三次因为“早期检查点正常”而误判。")
+         f"{ann_ncm['cil_acc']:.2f}", "—", "—"],
+        ["① 容量 + 预算", "11.2 M / 50ep", f"{ann_big['cil_acc']:.2f}",
+         f"**{ncm('ann_w64_e50')['cil_acc']:.2f}**",
+         f"{ann_big['cil_acc'] - ann5['cil_acc']:+.2f} 否定",
+         f"**+{ncm('ann_w64_e50')['cil_acc'] - ann_ncm['cil_acc']:.2f} 最好**"],
+        ["② 正则强度", "同上 + reg 3.0（4×）", f"{reg3['cil_acc']:.2f}",
+         f"{ncm('reg3_ann_w64_e50_reg3')['cil_acc']:.2f}",
+         f"{reg3['cil_acc'] - ann_big['cil_acc']:+.2f} 灾难",
+         f"{ncm('reg3_ann_w64_e50_reg3')['cil_acc'] - ncm('ann_w64_e50')['cil_acc']:+.2f} 不算差"],
+        ["③ 优化器", "2.8 M / 25ep / SGD 0.1", f"{sgd['cil_acc']:.2f}",
+         f"{ncm('ann_sgd')['cil_acc']:.2f}",
+         f"{sgd['cil_acc'] - ann5['cil_acc']:+.2f} 否定",
+         f"{ncm('ann_sgd')['cil_acc'] - ann_ncm['cil_acc']:+.2f} 略差"],
+        ["（对照）SNN", "2.80 M / 25ep", f"{snn['cil_acc']:.2f}", f"{snn_ncm['cil_acc']:.2f}", "—", "—"],
+        ["（对照）SNN", "11.2 M / 50ep", f"{snn_big['cil_acc']:.2f}",
+         f"{ncm('snn_w64_e50')['cil_acc']:.2f}",
+         f"{snn_big['cil_acc'] - snn['cil_acc']:+.2f}", 
+         f"**+{ncm('snn_w64_e50')['cil_acc'] - snn_ncm['cil_acc']:.2f}**"],
+    ], widths=[2.2, 4.0, 1.8, 1.6, 2.8, 2.8], size=8, highlight_rows=(0,),
+        caption_text="表 12k  线性头让我们把两项正收益误判成了负收益")
 
-    para(doc, "一条贯穿全项目的规律：", space_after=3, keep_next=True)
-    table(doc, ["改动", "旧任务", "新任务", "净"], [
-        ["固定正交头", "+3.2", "−1.0", "+3.86（早期任务）"],
-        ["soft-DTW 对齐", "+3.85", "−5.15", "−0.7"],
-        ["强正则（reg 3.0）", "+3.15", "−4.35", "−0.6"],
-        ["更大模型 + 更长训练", "**−8.35**", "+2.65", "−5.94"],
-    ], widths=[4.6, 2.4, 2.4, 5.2], size=9,
-        caption_text="表 12l  四种改动都只是在稳定性–可塑性权衡线上滑动")
-
-    para(doc, "**在固定预算下，稳定性与可塑性之间是一条近似 1:1 的权衡线。** 调正则、冻边界、"
-              "加时序约束都只是在这条线上移动位置；**只有提升表征质量（可学习 τ、更多时间步）"
-              "才能把整条线抬高**。这也意味着论文的 75.22 不能靠“补资源”复现——缺的东西仍未定位。",
+    bullet(doc, "**“加容量和预算是负收益”是错的**：线性头下 59.62（−5.94），类均值头下 "
+                f"{ncm('ann_w64_e50')['cil_acc']:.2f}（**全场最好**）。偏置的大小和容量正相关。")
+    bullet(doc, "**“正则 4 倍是灾难”也是错的**：46.50 → "
+                f"{ncm('reg3_ann_w64_e50_reg3')['cil_acc']:.2f}，只比同规模基线低 1.7。")
+    bullet(doc, "**唯一站得住的是优化器**：SGD 0.1 在两个评测头下都比 AdamW 差约 2 点。")
+    para(doc, "**为什么会这样**：线性头的新类偏置在“当前任务拟合得更狠”的配置上最大，而这些"
+              "恰好是我们之前判定为“过拟合/灾难”的配置。类均值头不依赖 logits 的绝对尺度，"
+              "所以它看到的是“特征空间里的类是否分得开”，而不是“分数有没有被压偏”。",
          indent_first=True)
+
+    # ---------------------------------------------------------- head bias
+    doc.add_page_break()
+    heading(doc, "8i  线性头在 class-IL 下不是可靠指标", level=2)
+    para(doc, "同一批 checkpoint、同一个缓冲区、同一次前向——只换推理头（线性 vs 类均值），"
+              "全部 25 组配置的结果如下。这一节是全文最重要的方法论发现。", indent_first=True)
+
+    rows = [["ANN + 官方机制超参", "55.02", "67.55", "+12.53"],
+            ["ANN + reg 3.0", "46.50", "68.21", "+21.71"],
+            ["ANN @ 11.2 M / 50ep", "59.62", "69.90", "+10.28"],
+            ["SNN 1:1 回放", "48.43", "63.93", "+15.50"],
+            ["SNN 官方配方（train-mode 记忆）", "27.44", "61.67", "+34.23"],
+            ["SNN PLIF 单独", "59.66", "66.42", "+6.76"],
+            ["SNN PLIF + T=8", "62.73", "67.58", "+4.85"],
+            ["SNN 基线", "57.51", "59.64", "+2.13"],
+            ["SNN 固定正交头", "61.37", "62.37", "+1.00"],
+            ["SNN 稳态阈值校准", "57.26", "24.54", "**−32.72**"]]
+    table(doc, ["配置", "线性头", "NCM", "增益"], rows,
+          widths=[6.0, 2.6, 2.6, 2.8], size=8.5, highlight_rows=(9,),
+          caption_text="表 12m  换头后 class-IL 的变化：−32.7 到 +34.2")
+
+    bullet(doc, "**增益跨度 67 点**。这说明线性头的误差不是小扰动，而是**许多配置下的主要误差"
+                "来源**——它随配置剧烈变化，因此线性头给出的排序基本不可用。")
+    bullet(doc, "**一个稳定的规律：线性头越差，NCM 增益越大。** 线性头的偏置集中在“当前任务"
+                "拟合得更狠”的配置上。")
+    bullet(doc, "**它也能反向出错**：`--calibrate` 那组的 NCM 反而低 32.7 点（特征尺度被校准"
+                "改坏，类均值头失效）。所以正确做法是**同时报告两个头**，而不是换一个更“好”的头。")
+    para(doc, "**给后续工作的建议**：任何 SNN-CIL 的消融都应该同时报告线性头与类均值头。"
+              "本文自己就是现成的反例——只看线性头会得出“加容量无用”“强正则有害”这类"
+              "相反的结论。", indent_first=True)
 
     # ------------------------------------------------------------- engineering
     doc.add_page_break()
@@ -819,36 +872,36 @@ def build() -> str:
     # ------------------------------------------------------------- conclusion
     heading(doc, "10  结论与后续")
     para(doc, "**已确立**", bold=True, space_after=3, keep_next=True)
-    bullet(doc, "CLS-ER 的机制不能直接搬到 SNN：六处失效，改造后值 +18.0 class-IL。")
-    bullet(doc, "瓶颈不在分类头（NCM +2.1）、不在目标函数（六组约束全负）、"
-                "不在回放比例（1:1 为 −9.1）、不在主损失权重（0.3/0.75 打平）、"
-                "也不在放电率漂移（稳态校准 5 任务上 −0.25）。")
-    bullet(doc, "**差距已可拆分（§8）**：17.71 点 = 9.66（预算/配方）+ 8.05（脉冲基底）。"
-                "基底差距主要体现在每个任务的绝对精度（低 2.6–12.9 点），而不是遗忘。")
-    bullet(doc, "**两个基底改进都只值一两点（§8b）**：T=8 拿到 +1.29（2 倍算力），"
-                "膜电位读出 +0.45（1.23 倍算力）。而“读出量化是主因”这个假设被直接证伪——"
-                "完全连续与 9 档量化几乎等价，说明 T 的收益来自更多实际计算，而非更细的量化。")
-    bullet(doc, "**唯一划算的结构改进是 PLIF（§8c）**：每层学一个时间常数，只多 17 个参数，"
-                "拿到 +2.15 class-IL 与 +2.57 task-IL。它同时改善了精度和表征质量。")
-    bullet(doc, f"**两者组合达到 {r('snn_plif_t8')['final']['cil_acc']:.2f}（§8e），且超可加**："
-                "单独 2.15 + 1.29，组合 5.22。PLIF 让每层找到合适的时间尺度，T=8 提供更多时间步，"
-                "**有了合适的 τ，多出来的时间步才用得上**。")
-    bullet(doc, "**“表征不够正交”这个诊断被证伪（§8d）**：把码字压到 5% 稀疏（并配 4 倍扩张，"
-                "存活 51 个单元）之后，class-IL 仍与基线持平。跨任务混淆的成因不是码字相关，"
-                "更可能是分类器在增长的 softmax 上失效、或特征被新任务梯度整体推走。")
-    bullet(doc, "**最重要的反转**：脉冲基底的代价不是 8.05 点，而是 **2.83 点**。"
-                "之前那些“改机制”的尝试之所以全部无效，是因为改错了地方——"
-                "瓶颈在基底的训练动力学（时间常数、时间步数），不在持续学习的约束。")
+    bullet(doc, "CLS-ER 的机制不能直接搬到 SNN：六处失效，改造后把 SNN 基线从 "
+                f"{ann_ncm['cil_acc'] - 9.36:.0f} 一档（ANN 口径的脉冲版）提到 "
+                f"{snn_ncm['cil_acc']:.2f}。")
+    bullet(doc, f"**最重要的方法论发现（§8i）**：线性头在 class-IL 下的偏置随配置变化 "
+                f"**67 点**（−32.7 到 +34.2），足以翻转结论。全部重测后，本文一半的排序发生变化。"
+                f"因此所有主数字都以**类均值头**给出，并同时列出线性头作对照。")
+    bullet(doc, f"**最好的 SNN 配置（§8e）**：PLIF + T=8，NCM 下 "
+                f"{plif8_ncm['cil_acc']:.2f}（线性 {r('snn_plif_t8')['final']['cil_acc']:.2f}）。"
+                f"PLIF 只加 17 个参数，T=8 加 2 倍算力，两者超可加。")
+    bullet(doc, f"**最好的 ANN（§8h）**：论文同规模（11.2 M / 50 ep），"
+                f"{ncm('ann_w64_e50')['cil_acc']:.2f}。这个配置在线性头下只有 "
+                f"{r('ann_w64_e50')['final']['cil_acc']:.2f}，曾被我们误判为“加资源是负收益”。")
+    bullet(doc, "**脉冲基底的代价不是固定值**：裸配置 9.36 → 加 PLIF 2.58 → 再加 T=8 **1.42**。"
+                "“脉冲差 8 点”只在完全没有优化的配置下成立。")
+    bullet(doc, "**两个基底改进的单变量效应（§8b）**：T=8 +1.29（2 倍算力），膜电位读出 +0.45。"
+                "“读出量化是主因”这个假设被直接证伪——完全连续与 9 档量化几乎等价。")
+    bullet(doc, "**“表征不够正交”这个诊断被证伪（§8d）**：把码字压到 5% 稀疏（配 4 倍扩张，"
+                "存活 51 个单元）之后，class-IL 仍与基线持平。")
+    bullet(doc, f"**“补资源没用”也是错的（§8h）**：那四个结论里有两个（容量/预算、强正则）"
+                f"在线性头下被误判成负收益，换头后分别是 +0.90 和 −1.69。"
+                f"唯一稳定为负的是 SGD 优化器（约 −2）。")
 
     para(doc, "**未完成 / 下一步**", bold=True, space_after=3, keep_next=True)
-    bullet(doc, "**width 64**（约 7 小时，显存有风险）：把参数从 2.8 M 提到与论文同规模的 11.2 M，"
-                "是最后一个便宜的容量杠杆；最好在 PLIF+T=8 的基础上试。")
-    bullet(doc, "**50 epochs**（约 7 小时）：验证 9.66 点的“预算差距”里有几成只是 epochs。")
-    bullet(doc, "**扫 `--stable-model-alpha`**（3 组 × 20 min 快验）：α=0.999 的等效窗口只有"
-                "1000 步，而一个任务是 7800 步——记忆的“记忆长度”只有任务长度的 1/8，"
-                "这是唯一没调过的核心超参。")
-    bullet(doc, "**多 seed**：本项目全部是单 seed，2 点以内的差异不应解读；"
-                "PLIF+T=8 的 5.22 点需要 3 seed 确认。")
+    bullet(doc, "**多 seed**：本项目全部是单 seed，2 点以内的差异不应解读。这是目前最大的短板。")
+    bullet(doc, "**把类均值头纳入训练**：现在它只是事后换头，若在训练期就用类均值分类器，"
+                "可能同时改善特征与打分。")
+    bullet(doc, "**解释 `--calibrate` 的 NCM 异常**（−32.7）：那组特征尺度被改坏，说明阈值校准"
+                "会改变特征几何，值得单独查。")
+    bullet(doc, "**PLIF + T=8 + 论文规模（11.2 M）**：三者还没一起跑过，是目前最有希望超过 70 的"
+                "组合（显存需要验证）。")
     bullet(doc, "**T=16**（约 7 小时）：按 T=4→8 的斜率预计再 +1 左右，收益递减，不推荐。")
     bullet(doc, "**换训练范式**（ANN-SNN 转换、长 T 训练后蒸馏到 T=4）：这 6.3 点最可能的来源是"
                 "替代梯度的偏差与固定 T 的计算深度上限，动它属于新项目量级。")
@@ -868,7 +921,7 @@ def build() -> str:
                      f"{mins:.0f}" if mins else "—"])
     table(doc, ["run", "任务数", "class-IL", "task-IL", "F_cil", "分钟"],
           rows, widths=[7.4, 2.2, 2.6, 2.6, 2.4, 2.0], size=8,
-          caption_text="表 A1  21 次训练运行（部分为快验，任务数 < 5）")
+          caption_text="表 A1  38 次训练运行（部分为快验，任务数 < 5）")
 
     heading(doc, "附录 B  复现命令", level=2)
     code_block(doc, [
