@@ -1124,6 +1124,58 @@ def test_temporal_alignment():
     print(f"  ok  temporal alignment: shift cost {d_shift:.2f} << content cost "
           f"{d_other:.2f}, non-negative loss, gradients flow, both modes wired")
 
+def test_mean_head():
+    """Class means: exact, normalised for cosine, unseen classes masked."""
+    from clser_snn.meanhead import MeanHead
+
+    h = MeanHead(n_classes=4, dim=3, metric="cosine", temperature=10.0)
+    feats = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+                          [0.0, 2.0, 0.0], [0.0, 2.0, 0.0]])
+    labels = torch.tensor([0, 0, 1, 1])
+    assert h.fit(feats, labels) == 2
+    assert h.present.tolist() == [True, True, False, False]
+    assert torch.allclose(h.prototypes[0], torch.tensor([1.0, 0.0, 0.0]), atol=1e-6)
+    assert torch.allclose(h.prototypes[1], torch.tensor([0.0, 1.0, 0.0]), atol=1e-6)
+
+    logits = h(torch.tensor([[1.0, 0.1, 0.0]]))
+    assert logits[0, 0] > logits[0, 1]                      # scores its own class
+    assert logits[0, 2] < -1e3 and logits[0, 3] < -1e3      # unseen masked out
+    assert not h.prototypes.requires_grad
+
+    e = MeanHead(n_classes=4, dim=3, metric="euclidean", temperature=1.0)
+    e.fit(feats, labels)
+    out = e(torch.tensor([[1.0, 0.05, 0.0]]))
+    assert out[0, 0] > out[0, 1] and torch.isfinite(out[0, :2]).all()
+    print(f"  ok  class-mean head: exact prototypes ({h.summary()}), unseen classes "
+          f"masked, both metrics, no parameters")
+
+
+def test_ncm_training_head():
+    """--head-mode ncm: the head scores, the linear layer gets no gradient."""
+    cfg = make_cfg(width=8, num_classes=4, head_mode="ncm")
+    model = SpikingCLSER(cfg)
+    assert model.heads is not None and model.memories.heads is model.heads
+
+    x = torch.randn(8, 3, 32, 32)
+    y = torch.randint(0, 4, (8,))
+    first = model.observe(x, y, x)
+    info = model.refresh_heads()
+    assert info is not None and "working" in info
+    second = model.observe(x, y, x)
+    assert torch.isfinite(torch.tensor(second["loss"]))
+
+    grads = [p.grad for p in model.net.fc.parameters() if p.grad is not None]
+    assert all(float(g.abs().sum()) == 0.0 for g in grads), "linear head must be unused"
+
+    # the memories score with their own prototypes
+    z_sel, w_sel = model.memories.select_logits(
+        encode_direct(x, cfg.time_steps), y)
+    assert z_sel.shape[0] == y.shape[0] and w_sel.shape[0] == y.shape[0]
+
+    assert first["ce"] > 0 and second["ce"] > 0
+    print(f"  ok  ncm training head: {info}; CE {first['ce']:.3f} -> {second['ce']:.3f}, "
+          f"linear layer unused, memories score with their own prototypes")
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     print("running CLS-ER + SD^2-SNN smoke tests ...")
@@ -1178,4 +1230,7 @@ if __name__ == "__main__":
     test_resume_plumbing()
     print("[M] temporal alignment (soft-DTW)")
     test_temporal_alignment()
+    print("[N] class-mean head used during training")
+    test_mean_head()
+    test_ncm_training_head()
     print("all smoke tests passed")

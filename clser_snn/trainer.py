@@ -123,6 +123,10 @@ class Trainer:
             info = model.refresh_prototypes()
             if info:
                 print(f"[proto] start of task {k}: {info}", flush=True)
+        if getattr(model, "heads", None) is not None:
+            info = model.refresh_heads()
+            if info:
+                print(f"[head] start of task {k}: {info}", flush=True)
 
         last: Dict[str, float] = {}
         for epoch in range(start_epoch, cfg.epochs):
@@ -144,12 +148,29 @@ class Trainer:
                     bucket[1] += 1
                 n_batches += 1
 
+                # cold start of the class-mean head: at the very first batch of a
+                # task the prototypes only cover *old* classes, so the new classes
+                # are masked out and receive no gradient. Two batches are enough to
+                # get new-class samples into the buffer, after which a rebuild gives
+                # every class a prototype.
+                if (getattr(model, "heads", None) is not None
+                        and epoch == start_epoch and n_batches == 2):
+                    info = model.refresh_heads()
+                    if info:
+                        print(f"  [head] task {k} cold start: {info}", flush=True)
+
             last = {}
             for key, (total, count) in agg.items():
                 last[key] = total / max(1, count)
             last["epoch"] = epoch + 1
             if getattr(model, "prototypes", None) is not None:
                 model.refresh_prototypes()          # targets follow the features
+            if getattr(model, "heads", None) is not None:
+                every = max(1, int(getattr(cfg, "head_refresh_every", 1)))
+                if (epoch + 1) % every == 0:
+                    info = model.refresh_heads()
+                    if info and (epoch + 1) % max(1, cfg.log_every) == 0:
+                        print(f"  [head] task {k} epoch {epoch + 1}: {info}", flush=True)
             if (epoch + 1) % max(1, cfg.log_every) == 0 or epoch == 0:
                 print(f"  [task {k} epoch {epoch + 1}/{cfg.epochs}] "
                       f"loss={last['loss']:.4f} ce={last['ce']:.4f} cons={last['cons']:.4f} "

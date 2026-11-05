@@ -66,6 +66,20 @@ class SemanticMemories(nn.Module):
         self.eval()
 
     # ------------------------------------------------------------- selection
+    def _memory_logits(self, which: str, x: torch.Tensor) -> torch.Tensor:
+        """Logits of one memory copy, honouring the training-time head mode.
+
+        With ``--head-mode ncm`` the linear layers of the memories are unused (they
+        never receive gradient), so the memories must be scored with **their own**
+        class means — each memory lives in its own feature space.
+        """
+        net = self.stable if which == "stable" else self.plastic
+        heads = getattr(self, "heads", None)
+        if heads is None:
+            return net(x)
+        feats = net.features(x).mean(dim=0)
+        return heads[which](feats)
+
     @torch.no_grad()
     def select_logits(self, x: torch.Tensor, labels: torch.Tensor,
                       reliability: Optional[torch.Tensor] = None
@@ -75,8 +89,8 @@ class SemanticMemories(nn.Module):
         Returns ``(z_selected, per_sample_weight)``; both detached. ``z_selected``
         在 hard 模式下就是原版的 ``torch.where``，在 soft 模式下是两记忆的凸组合。
         """
-        z_s = self.stable(x)
-        z_p = self.plastic(x)
+        z_s = self._memory_logits("stable", x)
+        z_p = self._memory_logits("plastic", x)
         p_s = F.softmax(z_s, dim=1)
         p_p = F.softmax(z_p, dim=1)
 
@@ -107,8 +121,11 @@ class SemanticMemories(nn.Module):
     @torch.no_grad()
     def stable_temporal(self, x: torch.Tensor) -> torch.Tensor:
         """逐 timestep 的稳定记忆 logits（供时序蒸馏使用）。"""
+        heads = getattr(self, "heads", None)
         if hasattr(self.stable, "forward_temporal"):
-            _, logits_t, _ = self.stable.forward_temporal(x)
+            _, logits_t, feats = self.stable.forward_temporal(x)
+            if heads is not None:                       # ncm 头：逐时刻重新打分
+                return heads["stable"](feats)
             return logits_t
         return self.stable(x).unsqueeze(0)
 
@@ -118,15 +135,17 @@ class SemanticMemories(nn.Module):
         if mode == "working":
             return working_logits
         if mode == "stable":
-            return self.stable(x)
+            return self._memory_logits("stable", x)
         if mode == "plastic":
-            return self.plastic(x)
+            return self._memory_logits("plastic", x)
         if mode == "mean":
-            probs = [F.softmax(working_logits, 1), F.softmax(self.stable(x), 1),
-                     F.softmax(self.plastic(x), 1)]
+            probs = [F.softmax(working_logits, 1),
+                     F.softmax(self._memory_logits("stable", x), 1),
+                     F.softmax(self._memory_logits("plastic", x), 1)]
             return torch.stack(probs).mean(0)
         if mode == "maxconf":
-            logits = torch.stack([working_logits, self.stable(x), self.plastic(x)])
+            logits = torch.stack([working_logits, self._memory_logits("stable", x),
+                                  self._memory_logits("plastic", x)])
             conf = F.softmax(logits, dim=-1).max(dim=-1).values
             pick = conf.argmax(dim=0)
             return logits.gather(0, pick.view(1, -1, 1).expand(1, -1, logits.shape[-1])).squeeze(0)

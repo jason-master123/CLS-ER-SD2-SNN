@@ -117,7 +117,28 @@ class SpikingCLSER(nn.Module):
                 temperature=float(getattr(cfg, "proto_temp", 0.1)),
                 device=str(self.device))
 
+        # ---- classifier used *during training* -------------------------------
+        # ``linear``: the usual learnable head (net.fc).
+        # ``ncm``   : a parameter-free class-mean head rebuilt from the buffer; the
+        #             linear layer is then unused, which removes the new-class logit
+        #             bias at its source instead of correcting it after the fact.
+        self.head_mode = str(getattr(cfg, "head_mode", "linear")).lower()
+        self.heads = None
+        if self.head_mode == "ncm":
+            from .meanhead import HeadBank
+            dim = int(getattr(self.net.fc, "in_features", 0))
+            self.heads = HeadBank(
+                n_classes=int(self.net.fc.out_features), dim=dim,
+                metric=str(getattr(cfg, "head_metric", "cosine")),
+                temperature=float(getattr(cfg, "head_temperature", 10.0))).to(self.device)
+        elif self.head_mode != "linear":
+            raise ValueError(f"unknown head_mode {self.head_mode!r}")
+
         self.current_task = 0
+        # the memories must score themselves with their own class means when the
+        # ncm head is active (their linear layers never receive gradient)
+        if self.heads is not None:
+            self.memories.heads = self.heads
         self.prev_basis: Optional[dict] = None
         self.last_stats: Dict[str, float] = {}
         self._replay_gen = torch.Generator(device=str(self.device)).manual_seed(cfg.seed + 7)
@@ -216,6 +237,11 @@ class SpikingCLSER(nn.Module):
 
             logits_all, logits_t_all, feats = self.net.forward_temporal(spk_all)
             rates = dict(self.monitor.rates)
+
+            if self.heads is not None:
+                # score with the class-mean head instead of the (unused) linear layer
+                logits_all = self.heads["working"](feats.mean(dim=0))
+                logits_t_all = self.heads["working"](feats)
 
             l_ce = F.cross_entropy(logits_all, y_all)
 
@@ -343,6 +369,26 @@ class SpikingCLSER(nn.Module):
             encode_fn=lambda x: encode_direct(x, self.cfg.time_steps),
             min_samples=int(getattr(self.cfg, "proto_min_samples", 4)))
         return self.prototypes.summary() if n else None
+
+    # --------------------------------------------- 类均值头刷新（ncm 训练模式）
+    @torch.no_grad()
+    def refresh_heads(self, names=None) -> Optional[str]:
+        """Rebuild the class means used by ``--head-mode ncm`` from the buffer.
+
+        Called at the same boundaries as ``refresh_prototypes``. Each model copy
+        (working / stable / plastic) gets **its own** prototypes, because each has
+        its own feature space; sharing them would make the consistency term
+        compare scores from two different geometries.
+        """
+        if self.heads is None or self.buffer.is_empty():
+            return None
+        from .meanhead import fit_heads
+        info = fit_heads(self.heads, self, self.buffer,
+                         lambda x: encode_direct(x, self.cfg.time_steps),
+                         names=names)
+        if not info:
+            return None
+        return ", ".join(f"{k}:{v}" for k, v in info.items())
 
     # --------------------------------------------------- 稳态阈值校准（SNN 特有）
     @torch.no_grad()

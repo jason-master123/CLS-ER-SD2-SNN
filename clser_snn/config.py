@@ -51,6 +51,11 @@ class HybridConfig:
     fixed_head_scale: float = 1.0       # 余弦模式下才有意义（10~30），非归一化时保持 1
     readout: str = "rate"               # rate（时间平均放电率）| membrane（末层膜电位）
     readout_norm: bool = True           # 膜电位读出时加 LayerNorm
+    # 训练期用的分类器：linear（可学习线性头）| ncm（类均值头，参数自由、每 epoch 重建）
+    head_mode: str = "linear"
+    head_metric: str = "cosine"         # cosine | euclidean（ncm 模式）
+    head_temperature: float = 10.0      # 相似度→logit 的温度
+    head_refresh_every: int = 1         # 每多少个 epoch 重建一次类均值（1 = 每个）
     amp: bool = False                   # bf16 autocast (fp16 unsafe for this net)
 
     # ------------------------------------------------ CLS-ER scheme (core)
