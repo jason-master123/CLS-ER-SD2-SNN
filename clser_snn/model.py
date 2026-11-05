@@ -140,7 +140,8 @@ class SpikingCLSER(nn.Module):
         if cfg.optimizer.lower() == "adamw":
             return torch.optim.AdamW(groups)
         if cfg.optimizer.lower() == "sgd":
-            return torch.optim.SGD(groups, momentum=0.9)
+            return torch.optim.SGD(groups,
+                                   momentum=float(getattr(cfg, "sgd_momentum", 0.9)))
         raise ValueError(cfg.optimizer)
 
     def set_optimizer(self, opt) -> None:
@@ -148,7 +149,14 @@ class SpikingCLSER(nn.Module):
 
     def train_step_mode(self, train: bool = True) -> None:
         self.net.train(train)
-        self.memories.eval()
+        # 官方 CLS-ER 从不对两个记忆模型调用 .eval()：它们的 deepcopy 发生在
+        # net 还是 train 模式时，所以记忆的前向用 **batch 统计量**做 BN，只需要
+        # EMA 参数就够了。我们的记忆默认在 eval 模式（用 running stats），
+        # 因此必须整状态 EMA。``--memory-train-mode`` 还原官方行为，用于复现。
+        if getattr(self.cfg, "memory_train_mode", False):
+            self.memories.train(train)
+        else:
+            self.memories.eval()
 
     def _reliability(self, feats: torch.Tensor) -> torch.Tensor:
         """每样本的脉冲可信度：脉冲总数相对期望值的比例（0..1）。

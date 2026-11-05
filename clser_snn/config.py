@@ -67,6 +67,8 @@ class HybridConfig:
     # ------------------------------- SNN-native adaptations (see memories.py)
     # 1) full-state EMA: parameters + BN statistics + neuron thresholds
     ema_buffers: bool = True
+    # 官方 CLS-ER 的记忆模型一直在 train 模式（BN 用 batch 统计）；复现时打开这个
+    memory_train_mode: bool = False
     # 2) soft confidence gate instead of CLS-ER's hard per-exemplar argmax
     selector_mode: str = "soft"          # soft | hard
     selector_beta: float = 4.0
@@ -138,6 +140,7 @@ class HybridConfig:
     lr: float = 1e-3
     weight_decay: float = 1e-4
     optimizer: str = "adamw"            # adamw | sgd
+    sgd_momentum: float = 0.9           # 官方 CLS-ER 用无 momentum 的 SGD，复现时设 0
     lr_schedule: str = "cosine"         # cosine | constant
     seed: int = 0
     device: str = "cuda"
