@@ -722,6 +722,79 @@ def build() -> str:
               "**实用结论**：算力受限用固定头（+3.86，零额外算力）；追求精度用 PLIF+T=8"
               "（+5.22，2.1× 算力）。", indent_first=True)
 
+    # ---------------------------------------------------------- temporal
+    doc.add_page_break()
+    heading(doc, "8g  时序蒸馏：两种对齐方式都无效", level=2)
+    para(doc, "脉冲网络输出的是**轨迹** h₁…h_T，而不是单个 logit 向量。逐时刻 KL 会把“证据晚一步"
+              "出现”当成遗忘，因此另实现了可微的 **soft-DTW 轨迹对齐**（Cuturi & Blondel 2017）："
+              "它给出两条轨迹之间的最优对齐路径，允许学生把证据整体提前或推后。", indent_first=True)
+    step = r("snn_tdist")["final"]
+    dtw = r("snn_tdtw")["final"]
+    table(doc, ["配置", "class-IL", "task-IL", "F_cil", "相对基线"], [
+        ["不蒸馏（基线）", f"{snn['cil_acc']:.2f}", f"{snn['til_acc']:.2f}",
+         f"{snn['forgetting_cil']:.2f}", "—"],
+        ["step：逐时刻 KL（λ=0.5）", f"{step['cil_acc']:.2f}", f"{step['til_acc']:.2f}",
+         f"{step['forgetting_cil']:.2f}", f"{step['cil_acc'] - snn['cil_acc']:+.2f}"],
+        ["**dtw：soft-DTW（λ=0.5）**", f"**{dtw['cil_acc']:.2f}**", f"{dtw['til_acc']:.2f}",
+         f"{dtw['forgetting_cil']:.2f}", f"**{dtw['cil_acc'] - snn['cil_acc']:+.2f}**"],
+    ], widths=[4.6, 2.6, 2.6, 2.4, 2.6], size=9, highlight_rows=(2,),
+        caption_text="表 12j  时序蒸馏的两种模式")
+
+    bullet(doc, "**两种都不行，而且 DTW 比逐时刻 KL 更差。** 这与“允许时间平移应该更好”的直觉相反。")
+    bullet(doc, "**λ 差 5 倍给出同一条曲线**（t1 78.2 / 78.3，t2 60.1 / 60.1），排除了“权重没调好”。")
+    bullet(doc, "**损伤位置固定：中间任务塌到 17–18**（基线 28.3）。中间任务既要向更新的轨迹对齐、"
+                "又要向更旧的轨迹对齐，每次拉它的梯度方向都不一致。")
+    para(doc, "实现上有一个必须记下的坑：soft-DTW 在两序列几乎相同时取值会低于硬最小值，"
+              "**这等于给“把 logits 压小”发奖励**。修复办法是减去 teacher 与自身的距离并 clamp。"
+              "单测锁住了核心性质：**时间平移 18.2 ≪ 内容改变 77.6**。", indent_first=True)
+
+    # ---------------------------------------------------------- scaling
+    doc.add_page_break()
+    heading(doc, "8h  配方四连否：容量、预算、正则、优化器都不是答案", level=2)
+    para(doc, "§8 把 17.7 点拆成“9.66 预算/配方 + 8.05 脉冲基底”。本节检验前半句：把四项可疑因素"
+              "逐一补上（全部在**稠密 ANN** 上做，先排除脉冲干扰）。", indent_first=True)
+
+    ann_big = r("ann_w64_e50")["final"]
+    reg3 = r("reg3_ann_w64_e50_reg3")["final"]
+    sgd = r("ann_sgd")["final"]
+    snn_big = r("snn_w64_e50")["final"]
+    table(doc, ["假设", "实验", "class-IL", "task-IL", "F_cil", "结论"], [
+        ["基线", "ANN 2.80 M / 25ep / AdamW / reg 0.75", f"**{ann5['cil_acc']:.2f}**",
+         f"{ann5['til_acc']:.2f}", f"{ann5['forgetting_cil']:.2f}", "—"],
+        ["① 容量 + 预算", "11.2 M / 50ep", f"{ann_big['cil_acc']:.2f}", f"{ann_big['til_acc']:.2f}",
+         f"{ann_big['forgetting_cil']:.2f}",
+         f"**{ann_big['cil_acc'] - ann5['cil_acc']:+.2f}** 否定"],
+        ["② 正则强度", "同上 + reg 3.0（4×）", f"{reg3['cil_acc']:.2f}", f"{reg3['til_acc']:.2f}",
+         f"{reg3['forgetting_cil']:.2f}",
+         f"**{reg3['cil_acc'] - ann_big['cil_acc']:+.2f}** 灾难"],
+        ["③ 优化器", "2.8 M / 25ep / SGD 0.1 + wd 5e-4", f"{sgd['cil_acc']:.2f}",
+         f"{sgd['til_acc']:.2f}", f"{sgd['forgetting_cil']:.2f}",
+         f"**{sgd['cil_acc'] - ann5['cil_acc']:+.2f}** 否定"],
+        ["（对照）SNN", "2.80 M / 25ep", f"{snn['cil_acc']:.2f}", f"{snn['til_acc']:.2f}",
+         f"{snn['forgetting_cil']:.2f}", "—"],
+        ["（对照）SNN", "11.2 M / 50ep", f"{snn_big['cil_acc']:.2f}", f"{snn_big['til_acc']:.2f}",
+         f"{snn_big['forgetting_cil']:.2f}", f"{snn_big['cil_acc'] - snn['cil_acc']:+.2f}（2.9× 算力）"],
+    ], widths=[2.4, 4.4, 2.0, 2.0, 1.8, 3.0], size=8, highlight_rows=(0,),
+        caption_text="表 12k  四种“补资源”的做法全部让结果变差")
+    bullet(doc, "**四种补法全部为负。** 加容量/预算/正则都会把**早期任务推塌**（t0 从 49.9 掉到 "
+                "38.5、27.6）而把最新任务推高——多出来的能力 100% 被遗忘吃掉了。")
+    bullet(doc, "**正则 4 倍是灾难**：class-IL 46.50，F_cil 48.19。而它在 t1 时看起来只差 0.6，"
+                "损伤沿任务序列累积才暴露——这是本项目第三次因为“早期检查点正常”而误判。")
+
+    para(doc, "一条贯穿全项目的规律：", space_after=3, keep_next=True)
+    table(doc, ["改动", "旧任务", "新任务", "净"], [
+        ["固定正交头", "+3.2", "−1.0", "+3.86（早期任务）"],
+        ["soft-DTW 对齐", "+3.85", "−5.15", "−0.7"],
+        ["强正则（reg 3.0）", "+3.15", "−4.35", "−0.6"],
+        ["更大模型 + 更长训练", "**−8.35**", "+2.65", "−5.94"],
+    ], widths=[4.6, 2.4, 2.4, 5.2], size=9,
+        caption_text="表 12l  四种改动都只是在稳定性–可塑性权衡线上滑动")
+
+    para(doc, "**在固定预算下，稳定性与可塑性之间是一条近似 1:1 的权衡线。** 调正则、冻边界、"
+              "加时序约束都只是在这条线上移动位置；**只有提升表征质量（可学习 τ、更多时间步）"
+              "才能把整条线抬高**。这也意味着论文的 75.22 不能靠“补资源”复现——缺的东西仍未定位。",
+         indent_first=True)
+
     # ------------------------------------------------------------- engineering
     doc.add_page_break()
     heading(doc, "9  工程问题与修复")

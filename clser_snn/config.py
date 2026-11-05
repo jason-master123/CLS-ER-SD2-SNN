@@ -146,7 +146,8 @@ class HybridConfig:
     save_ckpt: bool = True
     log_every: int = 10                 # epochs between console lines
     stop_after_task: int = 0
-    resume: str = ""                    # 从 runs/<tag> 的 last.pt 继续训练（跳过已完成的任务）
+    resume: str = ""                    # 从 runs/<tag> 的 last.pt 继续训练（任务/epoch 级恢复）
+    ckpt_every: int = 1                 # 每多少个 epoch 存一次检查点（1 = 每个 epoch）
 
     def resolved(self) -> "HybridConfig":
         if getattr(self, "_resolved", False):

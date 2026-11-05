@@ -39,6 +39,8 @@ class Trainer:
         self.history: List[dict] = []
         self.seen_classes: List[int] = []
         self.start_task = 0
+        self.start_epoch = 0
+        self.start_sched_offset = 0
         self.elapsed_offset = 0.0
         self._t0: Optional[float] = None
 
@@ -48,15 +50,30 @@ class Trainer:
         # Resuming therefore never re-trains a finished task.
         if resume:
             self.model.load_state_dict(resume["model"])
+            if "opt" in resume:
+                try:
+                    self.opt.load_state_dict(resume["opt"])
+                except (ValueError, KeyError) as exc:      # parameter groups changed
+                    print(f"[resume] optimizer state ignored ({exc})", flush=True)
             self.cil_matrix = [list(r) for r in resume.get("cil", [])]
             self.til_matrix = [list(r) for r in resume.get("til", [])]
             self.history = list(resume.get("history", []))
-            self.start_task = int(resume.get("task", -1)) + 1
+            done_task = int(resume.get("task", -1))
+            done_epoch = int(resume.get("epoch", -1))
+            # ``epoch`` is 0-based and refers to the last *completed* epoch, so a
+            # checkpoint taken mid-task resumes at the next epoch of the same task
+            if done_epoch >= 0 and done_epoch + 1 < int(cfg.epochs):
+                self.start_task = done_task
+                self.start_epoch = done_epoch + 1
+                self.start_sched_offset = int(resume.get("sched_offset", 0))
+            else:
+                self.start_task = done_task + 1
+                self.start_epoch = 0
+                self.start_sched_offset = 0
             self.seen_classes = [c for t in self.tasks[:self.start_task] for c in t.classes]
             self.elapsed_offset = float(resume.get("elapsed_s", 0.0))
-            print(f"[resume] restored after task {self.start_task - 1}; "
-                  f"continuing at task {self.start_task}/{len(self.tasks)} "
-                  f"(seen classes {self.seen_classes})", flush=True)
+            print(f"[resume] task {self.start_task}, epoch {self.start_epoch + 1}; "
+                  f"seen classes {self.seen_classes}", flush=True)
 
         self.run_dir = os.path.join(cfg.output_dir, cfg.run_name) if cfg.run_name else cfg.output_dir
         os.makedirs(self.run_dir, exist_ok=True)
@@ -73,7 +90,8 @@ class Trainer:
         for group, base in zip(self.opt.param_groups, self.base_lrs):
             group["lr"] = base
 
-    def train_one_task(self, k: int) -> Dict[str, float]:
+    def train_one_task(self, k: int, start_epoch: int = 0,
+                       sched_offset: int = 0) -> Dict[str, float]:
         cfg = self.cfg
         loader = task_loader(self.tasks[k], cfg, train=True)
         model = self.model
@@ -83,9 +101,15 @@ class Trainer:
         steps = max(1, len(loader) * cfg.epochs)
         if cfg.lr_schedule == "cosine":
             sched = torch.optim.lr_scheduler.CosineAnnealingLR(self.opt, T_max=steps)
+            # resume mid-task: fast-forward the schedule (no compute, just the counter)
+            if sched_offset > 0:
+                for _ in range(min(sched_offset, steps)):
+                    sched.step()
+                print(f"[resume] task {k}: cosine schedule fast-forwarded to "
+                      f"{sched_offset}/{steps} steps", flush=True)
         else:
             sched = None
-        if k == 0:
+        if k == 0 and start_epoch == 0:
             print(f"[lr] base learning rates: "
                   f"{[round(v, 6) for v in self.base_lrs]}", flush=True)
 
@@ -101,7 +125,7 @@ class Trainer:
                 print(f"[proto] start of task {k}: {info}", flush=True)
 
         last: Dict[str, float] = {}
-        for epoch in range(cfg.epochs):
+        for epoch in range(start_epoch, cfg.epochs):
             agg: Dict[str, list] = {}
             n_batches = 0
             for x_aug, y, x_raw in loader:
@@ -132,7 +156,24 @@ class Trainer:
                       f"proto={last.get('proto', float('nan')):.3f} "
                       f"frac_stable={last.get('frac_stable', float('nan')):.3f} "
                       f"buf={len(model.buffer)}", flush=True)
+            # per-epoch checkpoint: pausing at any moment loses at most one epoch
+            every = max(1, int(getattr(cfg, "ckpt_every", 1)))
+            if (epoch + 1) % every == 0 or (epoch + 1) == cfg.epochs:
+                self._save_state(k, epoch, (epoch + 1) * len(loader))
         return last
+
+    def _save_state(self, task: int, epoch: int, sched_offset: int) -> None:
+        """Atomically checkpoint the full training state after one epoch."""
+        if not self.cfg.save_ckpt:
+            return
+        path = os.path.join(self.run_dir, "last.pt")
+        tmp = path + ".tmp"
+        payload = {"model": self.model.state_dict(), "opt": self.opt.state_dict(),
+                   "cfg": self.cfg.to_dict(), "task": task, "epoch": epoch,
+                   "sched_offset": sched_offset, "cil": self.cil_matrix,
+                   "til": self.til_matrix}
+        torch.save(payload, tmp)
+        os.replace(tmp, path)             # atomic: a kill mid-write cannot corrupt it
 
     # ----------------------------------------------------------- evaluation
     @torch.no_grad()
@@ -212,7 +253,11 @@ class Trainer:
                 print(f"[calibrate] {cal['layers']} layers, mean firing rate "
                       f"{cal['rate_before']:.3f} -> {cal['rate_after']:.3f} "
                       f"(target {cfg.rate_target})", flush=True)
-            stats = self.train_one_task(k)
+            stats = self.train_one_task(
+                k, start_epoch=(self.start_epoch if k == self.start_task else 0),
+                sched_offset=(self.start_sched_offset if k == self.start_task else 0))
+            self.start_epoch = 0
+            self.start_sched_offset = 0
             self.model.current_task = k
             self.seen_classes.extend(task.classes)
             info = self.model.end_of_task(k, task_loader(task, cfg, train=True),
@@ -248,12 +293,13 @@ class Trainer:
 
     # ------------------------------------------------------------- plumbing
     def _save(self, record: dict) -> None:
+        """End-of-task bookkeeping: one checkpoint + the progress file."""
         if not self.cfg.save_ckpt:
             return
-        torch.save({"model": self.model.state_dict(), "cfg": self.cfg.to_dict(),
-                    "cil": self.cil_matrix, "til": self.til_matrix,
-                    "task": record["task"]},
-                   os.path.join(self.run_dir, "last.pt"))
+        # the task just finished, so the next resume starts at the *next* task
+        self._save_state(record["task"], int(self.cfg.epochs) - 1,
+                         len(task_loader(self.tasks[record["task"]], self.cfg, train=True))
+                         * int(self.cfg.epochs))
         elapsed = (time.time() - self._t0 + self.elapsed_offset
                    if self._t0 is not None else self.elapsed_offset)
         with open(os.path.join(self.run_dir, "progress.json"), "w") as f:
