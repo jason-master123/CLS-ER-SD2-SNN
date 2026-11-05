@@ -81,13 +81,29 @@ python scripts/train.py --dataset seq_cifar10 --epochs 25 --buffer-size 500 \
 
 以下运行的 `tasks_done = 2`，仅用于早期筛选。它们的绝对值系统性偏高，**这也是本项目
 最重要的一条方法论教训**：任务数 ≤ 2 的消融会高估"保护旧任务"类改动——同一改动
-（1:1 回放）在 2 任务上 +5.6、在 5 任务上 −9.1。
+（1:1 回放）在 2 任务上 +5.6、在 5 任务上在线性头下 −9.1（换类均值头后其实是 **+4.29**）。
 
 | run | class-IL（2 任务） | 说明 |
 |---|---|---|
 | `replay32` | 77.55 | 1:1 回放，2 任务 |
 | `proto_w00` ~ `proto4_C` | 68–72 | 特征原型约束六组 |
 | `cal_la2` | 73.92 | LA 校准，2 任务 |
+
+## 用类均值头重新评测（**重要**）
+
+线性头在 class-IL 下的新类偏置随配置变化 **30 点以上**（README §7j / 报告 §8i），
+所以任何结论都应该同时看两个头：
+
+```bash
+# 单个 checkpoint（几分钟，不训练）
+python tools/eval_head_compare.py runs/seq_cifar10_T8_w32_buf500_snn_plif_t8
+
+# 全部已完成的 5 任务运行（约 1 小时）
+python tools/head_sweep.py            # 结果写入 report/head_sweep.json
+```
+
+`head_sweep.py` 会把 linear / NCM-cosine / NCM-euclidean 三种头的结果并排打出，
+并按"最佳 NCM"重新排序。报告里所有主数字都取自这个文件。
 
 ## 报告与图表
 
