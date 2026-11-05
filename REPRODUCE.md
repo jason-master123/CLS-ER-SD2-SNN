@@ -121,3 +121,18 @@ python report/build_report.py          # 生成 report/*.docx
    时创建）。现在两者任一为正都会创建，并加了断言。
 3. **`--sparse-layers none` 曾静默关闭 Eq.14**。现在会显式报错。
 4. **单 seed**：绝对值 ±1–2 点在噪声内，只有跨多个检查点一致的趋势才值得解读。
+
+## 用类均值头训练（--head-mode ncm）
+
+把训练期的分类器从可学习线性层换成特征空间里的类均值（参数自由、每个 epoch 从缓冲区精确重建）：
+
+`ash
+python scripts/train.py --dataset seq_cifar10 --epochs 25 --buffer-size 500 \
+    --batch-size 32 --width 32 --head-mode ncm --head-metric cosine \
+    --device cuda --tag snn_ncm_train
+`
+
+要点：
+- 每个模型副本（working / stable / plastic）各自持有一套原型，因为它们的特征空间不同；
+- 未出现的类被掩到 −1e4（不贡献噪声）；
+- 任务开始后**前两个 batch** 会额外重建一次（冷启动），否则新类没有原型、拿不到梯度。
