@@ -107,6 +107,51 @@ class MeanHead(nn.Module):
     def num_present(self) -> int:
         return int(self.present.sum())
 
+    # ------------------------------------------------------- batch bootstrap
+    @torch.no_grad()
+    def _prototypes_with_batch(self, features: torch.Tensor, labels: torch.Tensor
+                               ) -> tuple:
+        """Stored prototypes, with missing classes filled from *this batch*.
+
+        The replay buffer is a reservoir over the whole stream, so early in a task
+        it holds almost no samples of the new classes: their prototypes are missing
+        and their logits are masked to −1e4 — which turns the training loss into
+        +1e4 instead of "no signal" (measured: an auxiliary CE of 7665). Filling
+        those rows from the current batch (detached) gives every present class a
+        usable prototype while stored classes keep their buffer-based means.
+        """
+        protos = self.prototypes.clone()
+        present = self.present.clone()
+        feats = features.detach()
+        if self.metric == "cosine":
+            feats = F.normalize(feats, dim=-1)
+        for cls in torch.unique(labels).tolist():
+            if present[cls]:
+                continue
+            mask = labels == cls
+            if int(mask.sum()) == 0:
+                continue
+            protos[cls] = feats[mask].mean(dim=0)
+            present[cls] = True
+        if self.metric == "cosine":
+            protos = F.normalize(protos, dim=-1)
+        return protos, present
+
+    def logits_with_batch(self, features: torch.Tensor, labels: torch.Tensor
+                          ) -> torch.Tensor:
+        """Like ``forward`` but tolerates classes the buffer has not covered yet."""
+        protos, present = self._prototypes_with_batch(features, labels)
+        feat = features
+        if self.metric == "cosine":
+            feat = F.normalize(feat, dim=-1)
+            sim = feat @ protos.t()
+        else:
+            sim = -torch.cdist(feat.reshape(-1, feat.shape[-1]), protos).pow(2)
+            sim = sim.reshape(*feat.shape[:-1], self.n_classes)
+        logits = sim * self.temperature
+        mask = present.reshape(*([1] * (logits.dim() - 1)), self.n_classes)
+        return logits.masked_fill(~mask, _NEG)
+
     def summary(self) -> str:
         if self.num_present == 0:
             return "empty"

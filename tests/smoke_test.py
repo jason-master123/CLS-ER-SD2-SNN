@@ -1176,6 +1176,26 @@ def test_ncm_training_head():
     print(f"  ok  ncm training head: {info}; CE {first['ce']:.3f} -> {second['ce']:.3f}, "
           f"linear layer unused, memories score with their own prototypes")
 
+def test_hybrid_head():
+    """hybrid = linear CE (learnable) + class-mean CE (aux, detached prototypes)."""
+    cfg = make_cfg(width=8, num_classes=4, head_mode="hybrid", head_aux_weight=0.5)
+    model = SpikingCLSER(cfg)
+    x = torch.randn(8, 3, 32, 32)
+    y = torch.randint(0, 4, (8,))
+    model.observe(x, y, x)
+    assert model.refresh_heads() is not None
+    out = model.observe(x, y, x)
+    assert out["aux"] > 0.0, out["aux"]                 # the auxiliary term is alive
+    # ... and the linear head still receives gradient (unlike pure ncm)
+    fc_grad = sum(float(p.grad.abs().sum()) for p in model.net.fc.parameters()
+                  if p.grad is not None)
+    assert fc_grad > 0.0, "linear head must keep learning in hybrid mode"
+    # the auxiliary term contributes exactly aux_weight * aux
+    expected = out["ce"] + cfg.reg_weight * out["cons"] + cfg.head_aux_weight * out["aux"]
+    assert abs(expected - out["loss"]) < 1e-3, (expected, out["loss"])
+    print(f"  ok  hybrid head: ce={out['ce']:.3f} + aux(weighted)="
+          f"{cfg.head_aux_weight * out['aux']:.3f}, linear head still learns")
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     print("running CLS-ER + SD^2-SNN smoke tests ...")
@@ -1233,4 +1253,5 @@ if __name__ == "__main__":
     print("[N] class-mean head used during training")
     test_mean_head()
     test_ncm_training_head()
+    test_hybrid_head()
     print("all smoke tests passed")

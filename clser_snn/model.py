@@ -120,11 +120,14 @@ class SpikingCLSER(nn.Module):
         # ---- classifier used *during training* -------------------------------
         # ``linear``: the usual learnable head (net.fc).
         # ``ncm``   : a parameter-free class-mean head rebuilt from the buffer; the
-        #             linear layer is then unused, which removes the new-class logit
-        #             bias at its source instead of correcting it after the fact.
+        #             linear layer is then unused. NOTE: pure ncm training collapses
+        #             to the log K stationary point (measured: 53.5 on a 2-class
+        #             task), so this mode is kept mostly as a negative control.
+        # ``hybrid``: CE on the linear head (which guarantees learning) **plus** a
+        #             class-mean CE as an auxiliary metric-learning term.
         self.head_mode = str(getattr(cfg, "head_mode", "linear")).lower()
         self.heads = None
-        if self.head_mode == "ncm":
+        if self.head_mode in ("ncm", "hybrid"):
             from .meanhead import HeadBank
             dim = int(getattr(self.net.fc, "in_features", 0))
             self.heads = HeadBank(
@@ -135,9 +138,12 @@ class SpikingCLSER(nn.Module):
             raise ValueError(f"unknown head_mode {self.head_mode!r}")
 
         self.current_task = 0
-        # the memories must score themselves with their own class means when the
-        # ncm head is active (their linear layers never receive gradient)
-        if self.heads is not None:
+        # The memories must score themselves the *same way* the student is scored,
+        # otherwise the consistency term compares two different geometries: in
+        # ``ncm`` mode the student is scored by class means, so the memories are
+        # too; in ``hybrid`` mode the student's CE still comes from the linear
+        # head, so the memories keep using their linear layers.
+        if self.heads is not None and self.head_mode == "ncm":
             self.memories.heads = self.heads
         self.prev_basis: Optional[dict] = None
         self.last_stats: Dict[str, float] = {}
@@ -238,10 +244,22 @@ class SpikingCLSER(nn.Module):
             logits_all, logits_t_all, feats = self.net.forward_temporal(spk_all)
             rates = dict(self.monitor.rates)
 
+            l_aux = torch.zeros((), device=self.device)
             if self.heads is not None:
-                # score with the class-mean head instead of the (unused) linear layer
-                logits_all = self.heads["working"](feats.mean(dim=0))
-                logits_t_all = self.heads["working"](feats)
+                head = self.heads["working"]
+                rate_all = feats.mean(dim=0)
+                # ``logits_with_batch`` fills classes the reservoir has not covered
+                # yet from this batch; plain ``forward`` would mask them to −1e4.
+                z_mean = head.logits_with_batch(rate_all, y_all)
+                if self.head_mode == "ncm":
+                    # the mean head *is* the classifier (pure prototype training)
+                    logits_all = z_mean
+                    logits_t_all = head.logits_with_batch(feats, y_all)
+                else:
+                    # hybrid: keep the linear head for CE, add the mean head as an
+                    # auxiliary metric-learning term (stored prototypes are detached
+                    # buffers, so they cannot chase the features)
+                    l_aux = F.cross_entropy(z_mean, y_all)
 
             l_ce = F.cross_entropy(logits_all, y_all)
 
@@ -288,6 +306,8 @@ class SpikingCLSER(nn.Module):
                         l_temp = torch.stack(terms).mean()
 
             loss = l_ce + cfg.reg_weight * l_cons
+            if getattr(cfg, "head_aux_weight", 0.0) > 0 and l_aux.requires_grad:
+                loss = loss + float(cfg.head_aux_weight) * l_aux
             if getattr(cfg, "temporal_weight", 0.0) > 0:
                 loss = loss + cfg.temporal_weight * l_temp
 
@@ -340,6 +360,7 @@ class SpikingCLSER(nn.Module):
             "ce": float(l_ce.detach()),
             "cons": float(l_cons.detach()),
             "cons_w": float(cfg.reg_weight * l_cons.detach()),
+            "aux": float(l_aux.detach()),
             "temp": float(l_temp.detach()),
             "prox": float(l_prox.detach()),
             "proto": float(l_proto.detach()),

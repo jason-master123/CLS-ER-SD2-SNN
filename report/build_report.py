@@ -848,6 +848,39 @@ def build() -> str:
               "本文自己就是现成的反例——只看线性头会得出“加容量无用”“强正则有害”这类"
               "相反的结论。", indent_first=True)
 
+    # -------------------------------------------------- training with ncm
+    doc.add_page_break()
+    heading(doc, "8j  为什么类均值头不能拿来训练", level=2)
+    para(doc, "既然类均值头评测能白拿 +2.1~4.9 点，自然的问题是：训练期就用它会怎样？"
+              "两条路都试了，都失败，而且失败原因相同。", indent_first=True)
+    table(doc, ["分类器", "t0（2 类任务）", "task 0 第 20 epoch 的 CE"], [
+        ["线性头（基线）", "**96.1**", "~0.09"],
+        ["纯类均值头（`--head-mode ncm`）", "**53.5**", "log K（完全不学）"],
+        ["混合（`--head-mode hybrid`，辅助项 0.1）", "**60.0**", "0.70"],
+    ], widths=[6.6, 3.2, 4.0], size=9, highlight_rows=(0,),
+        caption_text="表 12n  三种分类器：只有可学习的线性头能训练")
+
+    bullet(doc, "**根因**：`p_c = mean(f | label = c)`，损失把 `f` 推向 `p_c`、同时又让 `p_c` "
+                "跟着 `f` 走，两者互相抵消。")
+    bullet(doc, "**纯类均值头坍缩到 `CE = log K` 的驻点**：所有特征压成一点 → 所有原型相同 → "
+                "softmax 均匀 → **梯度恰好为零**，模型永远出不来。")
+    bullet(doc, "**混合方案只是减慢了坍缩**：CE 项还在，但辅助项持续把同类特征往“批次均值”拉，"
+                "而那是特征自己算出来的目标——等价于鼓励把同类压成一个点，t0 只有 60.0。")
+
+    para(doc, "实现中修掉的两个问题（都不是根因，但都值得记）：", space_after=3, keep_next=True)
+    table(doc, ["问题", "现象", "修复"], [
+        ["记忆用类均值头、学生用线性头", "一致性项比较两种几何，cons 0.15 → 1.10",
+         "只在纯 ncm 模式下让记忆也用类均值头"],
+        ["新类还没进缓冲区 → 无原型 → logit 掩到 −1e4", "辅助损失爆炸到 7665（loss 767）",
+         "缺失的类用当前批次的特征均值临时补上"],
+    ], widths=[5.2, 4.6, 4.2], size=8.5,
+        caption_text="表 12o  两条失败路线的实现缺陷")
+
+    para(doc, "**结论**：事后换头的那 2.1 点是一次性收益，不能靠“训练期换头”扩大。要让类均值头"
+              "参与训练而不坍缩，需要对比学习那一套（stop-gradient + 负样本队列 + 动量编码器，"
+              "SwAV/MoCo 式），那是另一个量级的工程，且与本文确认有效的主线（改基底：PLIF、"
+              "时间步）方向不同。", indent_first=True)
+
     # ------------------------------------------------------------- engineering
     doc.add_page_break()
     heading(doc, "9  工程问题与修复")
@@ -921,7 +954,8 @@ def build() -> str:
                      f"{mins:.0f}" if mins else "—"])
     table(doc, ["run", "任务数", "class-IL", "task-IL", "F_cil", "分钟"],
           rows, widths=[7.4, 2.2, 2.6, 2.6, 2.4, 2.0], size=8,
-          caption_text="表 A1  38 次训练运行（部分为快验，任务数 < 5）")
+          caption_text="表 A1  38 次训练运行（部分为快验，任务数 < 5）。此处为**线性头**数字；"
+                     "同一批 checkpoint 的类均值头结果见 §8i 与 report/head_sweep.json")
 
     heading(doc, "附录 B  复现命令", level=2)
     code_block(doc, [

@@ -52,10 +52,13 @@ class HybridConfig:
     readout: str = "rate"               # rate（时间平均放电率）| membrane（末层膜电位）
     readout_norm: bool = True           # 膜电位读出时加 LayerNorm
     # 训练期用的分类器：linear（可学习线性头）| ncm（类均值头，参数自由、每 epoch 重建）
+    #   hybrid：CE 仍走线性头（保证能学），另加一项类均值头的 CE 作为辅助约束——
+    #   纯 ncm 训练会坍缩到 log K 的驻点（见 meanhead.py 的说明），hybrid 避开它。
     head_mode: str = "linear"
     head_metric: str = "cosine"         # cosine | euclidean（ncm 模式）
     head_temperature: float = 10.0      # 相似度→logit 的温度
     head_refresh_every: int = 1         # 每多少个 epoch 重建一次类均值（1 = 每个）
+    head_aux_weight: float = 0.1        # hybrid 模式下类均值头的辅助损失权重
     amp: bool = False                   # bf16 autocast (fp16 unsafe for this net)
 
     # ------------------------------------------------ CLS-ER scheme (core)
