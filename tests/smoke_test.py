@@ -1224,6 +1224,39 @@ def test_learnable_vth():
     print(f"  ok  learnable threshold: {n_lif} scalars (+{n_lif} params), init v_th=1, "
           f"gradients reach every layer, setter keeps it positive")
 
+def test_readout_pool():
+    """avg / flatten / attention: the only stage that decides *where* evidence goes."""
+    from clser_snn.backbone import build_backbone
+
+    avg = build_backbone(make_cfg(width=32))
+    flat = build_backbone(make_cfg(width=32, readout_pool="flatten"))
+    attn = build_backbone(make_cfg(width=32, readout_pool="attention"))
+
+    x = torch.randn(4, 6, 3, 32, 32)
+    assert avg.features(x).shape == (4, 6, 256)
+    assert flat.features(x).shape == (4, 6, 256 * 16), "4x4 grid must survive"
+    assert attn.features(x).shape == (4, 6, 256)
+    assert flat.num_params > avg.num_params, "a 4096-d head is not free"
+    assert attn.num_params == avg.num_params + 257, "one 1x1 gate conv"
+
+    out = attn(x)
+    out.sum().backward()
+    assert attn.spatial_gate.weight.grad is not None
+    assert float(attn.spatial_gate.weight.grad.abs().sum()) > 0
+
+    # the point of the change: two maps with the *same mean* but different layout
+    # are indistinguishable after global averaging and distinguishable after flatten
+    a = torch.zeros(1, 1, 4, 4); a[..., 0, 0] = 1.0
+    b = torch.zeros(1, 1, 4, 4); b[..., 3, 3] = 1.0
+    pooled_a = avg._pool_features(a)
+    pooled_b = avg._pool_features(b)
+    assert torch.allclose(pooled_a, pooled_b), "avg pooling cannot tell them apart"
+    flat._pool_features(a)
+    assert not torch.allclose(flat._pool_features(a), flat._pool_features(b))
+    print(f"  ok  readout pooling: 256 (avg) vs {flat.feat_dim} (flatten) vs 256 (attention); "
+          f"+{flat.num_params - avg.num_params} params for flatten, +257 for the gate; "
+          f"avg pooling provably cannot tell two layouts apart")
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     print("running CLS-ER + SD^2-SNN smoke tests ...")
@@ -1283,4 +1316,5 @@ if __name__ == "__main__":
     test_ncm_training_head()
     test_hybrid_head()
     test_learnable_vth()
+    test_readout_pool()
     print("all smoke tests passed")

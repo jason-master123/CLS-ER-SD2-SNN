@@ -51,6 +51,9 @@ class HybridConfig:
     fixed_head_norm: bool = False
     fixed_head_scale: float = 1.0       # 余弦模式下才有意义（10~30），非归一化时保持 1
     readout: str = "rate"               # rate（时间平均放电率）| membrane（末层膜电位）
+    # 空间池化方式：avg（全局平均，一直用的）| flatten（保留 4×4 网格，C·H·W 维）
+    #               | attention（SE 式的逐样本空间门控后再平均）
+    readout_pool: str = "avg"
     readout_norm: bool = True           # 膜电位读出时加 LayerNorm
     # 训练期用的分类器：linear（可学习线性头）| ncm（类均值头，参数自由、每 epoch 重建）
     #   hybrid：CE 仍走线性头（保证能学），另加一项类均值头的 CE 作为辅助约束——

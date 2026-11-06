@@ -79,7 +79,7 @@ class SpikingResNet18(nn.Module):
                  detach_reset: bool = True, energy_layer: Optional[nn.Linear] = None,
                  readout: str = "rate", readout_norm: bool = True,
                  learnable_tau: bool = False, learnable_vth: bool = False,
-                 kwta_ratio: float = 0.0,
+                 kwta_ratio: float = 0.0, readout_pool: str = "avg",
                  kwta_expand: int = 1, fixed_head: str = "none",
                  fixed_head_norm: bool = False, fixed_head_scale: float = 1.0) -> None:
         super().__init__()
@@ -102,14 +102,35 @@ class SpikingResNet18(nn.Module):
         self.layer2 = self._make_layer(width * 2, 2, 2, **lif_kw)
         self.layer3 = self._make_layer(width * 4, 2, 2, **lif_kw)
         self.layer4 = self._make_layer(width * 8, 2, 2, **lif_kw)
+
+        # ---- how the 4x4 (or 8x8) spike map becomes the feature vector --------
+        # ``avg``      : global average pooling -> C dimensions. This is what every
+        #                experiment so far used, and it is the one stage of the
+        #                pipeline we never questioned: "where" the evidence is gets
+        #                averaged away before the classifier ever sees it.
+        # ``flatten``  : keep the spatial grid -> C*H*W dimensions (4096 at width 32).
+        # ``attention``: a learned per-sample spatial gate before the average (SE
+        #                style), so the network can decide which locations matter.
+        self.readout_pool = str(readout_pool).lower()
+        if self.readout_pool not in ("avg", "flatten", "attention"):
+            raise ValueError(f"unknown readout_pool {readout_pool!r}")
+        spatial = (img_size // 8) if img_size < 64 else (img_size // 16)
+        channels = width * 8
+        if self.readout_pool == "flatten":
+            self.feat_dim = channels * spatial * spatial
+        else:
+            self.feat_dim = channels
         self.avgpool = nn.AdaptiveAvgPool2d(1)
-        code_dim = width * 8 * self.kwta_expand
+        self.spatial_gate = (nn.Conv2d(channels, 1, kernel_size=1)
+                             if self.readout_pool == "attention" else None)
+
+        code_dim = self.feat_dim * self.kwta_expand
         # dentate-gyrus expansion (EC -> DG): C -> r*C, then ReLU, then k-WTA
-        self.dg = (nn.Linear(width * 8, code_dim)
+        self.dg = (nn.Linear(self.feat_dim, code_dim)
                    if self.kwta_expand > 1 else None)
         self.fc = nn.Linear(code_dim, num_classes)
         # membrane readout is unbounded; keep the scale comparable to spike rates
-        self.readout_norm = (nn.LayerNorm(width * 8)
+        self.readout_norm = (nn.LayerNorm(self.feat_dim)
                              if (self.readout == "membrane" and readout_norm)
                              else nn.Identity())
 
@@ -160,27 +181,32 @@ class SpikingResNet18(nn.Module):
         x = self.layer3(x)
         return self.layer4(x)
 
+    def _pool_features(self, maps: torch.Tensor) -> torch.Tensor:
+        """(N, C, H, W) spike maps -> (N, feat_dim) according to ``readout_pool``."""
+        if self.readout_pool == "flatten":
+            return maps.reshape(maps.shape[0], -1)
+        if self.readout_pool == "attention":
+            # per-sample spatial gate: where should the classifier look?
+            gates = torch.sigmoid(self.spatial_gate(maps))      # (N,1,H,W)
+            maps = maps * gates
+        return self.avgpool(maps).reshape(maps.shape[0], -1)
+
     def features(self, x: torch.Tensor) -> torch.Tensor:
-        """(T, B, 3, H, W) -> pooled features.
+        """(T, B, 3, H, W) -> features.
 
-        Two readouts, selected by ``self.readout``:
-
-        ``rate``      (T, B, C) — mean spike count per neuron. With T=4 each
-                      component takes only 5 distinct values, a very coarse
-                      quantisation of the evidence.
-        ``membrane``  (1, B, C) — the last layer's membrane potential *before* the
-                      final reset: continuous, and it accumulates evidence over the
-                      whole window. Costs nothing extra (same T).
+        The time axis is pooled by the caller; ``readout_pool`` decides how the
+        spatial grid is collapsed (see ``__init__``), and ``readout`` decides
+        whether the feature is a spike rate or the final membrane potential.
         """
         x = self._run_stages(x)
         if self.readout == "membrane":
             last_lif = self.layer4[-1].lif2
             v = last_lif.last_v                    # (B, C', H, W), pre-reset
-            pooled = self.avgpool(v).reshape(v.shape[0], -1)
+            pooled = self._pool_features(v)
             pooled = self.readout_norm(pooled)     # keep the scale sane for the head
-            return pooled.unsqueeze(0)             # (1, B, C)
+            return pooled.unsqueeze(0)             # (1, B, feat_dim)
         T, B = x.shape[0], x.shape[1]
-        x = self.avgpool(x.reshape(T * B, *x.shape[2:]))
+        x = self._pool_features(x.reshape(T * B, *x.shape[2:]))
         return x.reshape(T, B, -1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -277,6 +303,7 @@ def build_backbone(cfg):
         surrogate_alpha=cfg.surrogate_alpha,
         detach_reset=cfg.detach_reset,
         readout=getattr(cfg, "readout", "rate"),
+        readout_pool=getattr(cfg, "readout_pool", "avg"),
         readout_norm=getattr(cfg, "readout_norm", True),
         learnable_tau=getattr(cfg, "lif_learnable", False),
         learnable_vth=getattr(cfg, "lif_learnable_vth", False),
