@@ -139,7 +139,17 @@ class MeanHead(nn.Module):
 
     def logits_with_batch(self, features: torch.Tensor, labels: torch.Tensor
                           ) -> torch.Tensor:
-        """Like ``forward`` but tolerates classes the buffer has not covered yet."""
+        """Like ``forward`` but tolerates classes the buffer has not covered yet.
+
+        ``features`` may be ``(D,)``/``(B, D)`` or a per-timestep ``(T, B, D)``
+        stack; in the latter case ``labels`` (B,) is tiled over the time axis.
+        """
+        if features.dim() > 2:
+            T = features.shape[0]
+            flat = features.reshape(-1, features.shape[-1])
+            labels_flat = labels.repeat(T)
+            out = self.logits_with_batch(flat, labels_flat)
+            return out.reshape(*features.shape[:-1], self.n_classes)
         protos, present = self._prototypes_with_batch(features, labels)
         feat = features
         if self.metric == "cosine":
