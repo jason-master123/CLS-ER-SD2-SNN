@@ -19,6 +19,7 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class _ATan(torch.autograd.Function):
@@ -58,14 +59,16 @@ class LIFNode(nn.Module):
 
     def __init__(self, tau: float = 2.0, v_threshold: float = 1.0, v_reset: float = 0.0,
                  surrogate_alpha: float = 4.0, detach_reset: bool = True,
-                 decay_input: bool = True, learnable_tau: bool = False) -> None:
+                 decay_input: bool = True, learnable_tau: bool = False,
+                 learnable_vth: bool = False) -> None:
         super().__init__()
         self.tau = float(tau)
-        self.v_threshold = float(v_threshold)
+        self._v_th = float(v_threshold)
         self.v_reset = float(v_reset)
         self.surrogate_alpha = float(surrogate_alpha)
         self.detach_reset = detach_reset
         self.learnable_tau = bool(learnable_tau)
+        self.learnable_vth = bool(learnable_vth)
         # PLIF writes the input term undivided, which corresponds to decay_input=False
         self.decay_input = False if self.learnable_tau else decay_input
         self.last_spike: Optional[torch.Tensor] = None
@@ -74,11 +77,37 @@ class LIFNode(nn.Module):
             init = math.log(1.0 / max(1e-3, min(1.0 - 1e-3, 1.0 / self.tau)))
             init = math.log((1.0 / self.tau) / (1.0 - 1.0 / self.tau))
             self.a = nn.Parameter(torch.tensor(float(init)))
+        if self.learnable_vth:
+            # v_th = softplus(a_th), initialised to the fixed value (default 1.0)
+            v0 = max(1e-3, self._v_th)
+            self.a_th = nn.Parameter(torch.tensor(float(math.log(math.expm1(v0)))))
 
     @property
     def inv_tau(self):
         """1/tau — a tensor when parametric, a float otherwise."""
         return torch.sigmoid(self.a) if self.learnable_tau else (1.0 / self.tau)
+
+    @property
+    def v_threshold(self):
+        """Firing threshold — a tensor when learnable, a float otherwise.
+
+        Exposed as a property so that everything that used to read/write the plain
+        attribute (homeostatic calibration, the full-state EMA of the memories)
+        keeps working without knowing about the parametrisation.
+        """
+        if self.learnable_vth:
+            return F.softplus(self.a_th) + 1e-6
+        return self._v_th
+
+    @v_threshold.setter
+    def v_threshold(self, value) -> None:
+        v = float(value)
+        if getattr(self, "learnable_vth", False):
+            v = max(1e-3, v)
+            with torch.no_grad():
+                self.a_th.fill_(float(math.log(math.expm1(v))))
+        else:
+            self._v_th = v
 
     def extra_repr(self) -> str:
         tau = f"1/tau~sigmoid(a) (init {1.0 / self.tau:.3f})" if self.learnable_tau \

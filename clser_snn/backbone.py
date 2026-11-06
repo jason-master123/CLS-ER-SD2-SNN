@@ -78,7 +78,8 @@ class SpikingResNet18(nn.Module):
                  tau: float = 2.0, v_threshold: float = 1.0, surrogate_alpha: float = 4.0,
                  detach_reset: bool = True, energy_layer: Optional[nn.Linear] = None,
                  readout: str = "rate", readout_norm: bool = True,
-                 learnable_tau: bool = False, kwta_ratio: float = 0.0,
+                 learnable_tau: bool = False, learnable_vth: bool = False,
+                 kwta_ratio: float = 0.0,
                  kwta_expand: int = 1, fixed_head: str = "none",
                  fixed_head_norm: bool = False, fixed_head_scale: float = 1.0) -> None:
         super().__init__()
@@ -92,7 +93,7 @@ class SpikingResNet18(nn.Module):
             raise ValueError(f"unknown readout {readout!r}")
         lif_kw = dict(tau=tau, v_threshold=v_threshold,
                       surrogate_alpha=surrogate_alpha, detach_reset=detach_reset,
-                      learnable_tau=learnable_tau)
+                      learnable_tau=learnable_tau, learnable_vth=learnable_vth)
 
         self.in_planes = width
         self.stem = SpikingStem(3, width, **lif_kw)
@@ -278,6 +279,7 @@ def build_backbone(cfg):
         readout=getattr(cfg, "readout", "rate"),
         readout_norm=getattr(cfg, "readout_norm", True),
         learnable_tau=getattr(cfg, "lif_learnable", False),
+        learnable_vth=getattr(cfg, "lif_learnable_vth", False),
         kwta_ratio=getattr(cfg, "kwta_ratio", 0.0),
         kwta_expand=getattr(cfg, "kwta_expand", 1),
         fixed_head=getattr(cfg, "fixed_head", "none"),

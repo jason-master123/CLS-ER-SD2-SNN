@@ -1196,6 +1196,34 @@ def test_hybrid_head():
     print(f"  ok  hybrid head: ce={out['ce']:.3f} + aux(weighted)="
           f"{cfg.head_aux_weight * out['aux']:.3f}, linear head still learns")
 
+def test_learnable_vth():
+    """Per-layer learnable firing threshold (the sibling of PLIF's learnable tau)."""
+    from clser_snn.backbone import build_backbone
+    from clser_snn.neurons import LIFNode
+
+    fixed = build_backbone(make_cfg(width=32))
+    learn = build_backbone(make_cfg(width=32, lif_learnable_vth=True))
+    n_lif = sum(1 for m in learn.modules() if isinstance(m, LIFNode))
+    assert learn.num_params - fixed.num_params == n_lif, "one scalar per LIF layer"
+
+    lif = next(m for m in learn.modules() if isinstance(m, LIFNode))
+    assert abs(float(lif.v_threshold) - 1.0) < 1e-4, "init must reproduce v_th=1"
+
+    learn(torch.randn(4, 6, 3, 32, 32)).sum().backward()
+    grads = [m.a_th.grad for m in learn.modules()
+             if isinstance(m, LIFNode) and m.learnable_vth]
+    assert all(g is not None for g in grads), "threshold received no gradient"
+    assert any(float(g.abs().sum()) > 0 for g in grads), "all threshold grads are zero"
+
+    lif.v_threshold = 3.0                      # setter round-trip (and positivity)
+    assert abs(float(lif.v_threshold) - 3.0) < 1e-4
+    assert float(lif.v_threshold) > 0
+
+    both = build_backbone(make_cfg(width=32, lif_learnable=True, lif_learnable_vth=True))
+    assert both.num_params - fixed.num_params == 2 * n_lif
+    print(f"  ok  learnable threshold: {n_lif} scalars (+{n_lif} params), init v_th=1, "
+          f"gradients reach every layer, setter keeps it positive")
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     print("running CLS-ER + SD^2-SNN smoke tests ...")
@@ -1254,4 +1282,5 @@ if __name__ == "__main__":
     test_mean_head()
     test_ncm_training_head()
     test_hybrid_head()
+    test_learnable_vth()
     print("all smoke tests passed")

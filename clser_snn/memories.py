@@ -177,11 +177,16 @@ class SemanticMemories(nn.Module):
                 mb.data.mul_(alpha).add_(b.data, alpha=1.0 - alpha)
             else:
                 mb.data.copy_(b.data)
-        # 阈值是普通属性而非 buffer：按同一 alpha 做标量 EMA
+        # 阈值是普通属性而非 buffer：按同一 alpha 做标量 EMA。
+        # 可学习的阈值已经是一个 nn.Parameter，上面那段参数 EMA 会自动处理它——
+        # 再走一次会让它被 EMA 两遍，所以这里跳过。
         for m_mem, m_work in zip(memory.modules(), working.modules()):
-            if hasattr(m_work, "v_threshold") and hasattr(m_mem, "v_threshold"):
-                m_mem.v_threshold = (alpha * m_mem.v_threshold
-                                     + (1 - alpha) * m_work.v_threshold)
+            if not (hasattr(m_work, "v_threshold") and hasattr(m_mem, "v_threshold")):
+                continue
+            if getattr(m_work, "learnable_vth", False):
+                continue
+            m_mem.v_threshold = (alpha * m_mem.v_threshold
+                                 + (1 - alpha) * m_work.v_threshold)
 
     # -------------------------------------------------- 近端约束（新皮层固化）
     def proximal_term(self, working: nn.Module) -> torch.Tensor:

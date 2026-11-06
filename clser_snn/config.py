@@ -41,6 +41,7 @@ class HybridConfig:
     surrogate_alpha: float = 4.0
     detach_reset: bool = True
     lif_learnable: bool = False         # PLIF：每层可学习的膜时间常数（ICCV'21）
+    lif_learnable_vth: bool = False     # 每层可学习的发放阈值（v_th = softplus(a)）
     kwta_ratio: float = 0.0             # 齿状回模式分离：保留 top-k% 特征（0 关闭）
     kwta_expand: int = 1                # 齿状回扩张倍数（>1 时先 C→r·C 再稀疏）
     fixed_head: str = "none"            # none | orthogonal（PS-SNN：固定正交类中心）
