@@ -261,6 +261,35 @@
     }
   },
   {
+    "run": "seq_cifar10_T4_w32_buf500_snn_plif_flat",
+    "linear": 60.06,
+    "ncm_cosine": 65.01,
+    "ncm_euclid": 64.81,
+    "per_task": {
+      "linear": [
+        43.9,
+        30.5,
+        55.0,
+        76.3,
+        94.7
+      ],
+      "ncm_cosine": [
+        65.3,
+        42.5,
+        55.9,
+        74.0,
+        87.2
+      ],
+      "ncm_euclid": [
+        62.5,
+        46.2,
+        55.9,
+        71.7,
+        87.8
+      ]
+    }
+  },
+  {
     "run": "seq_cifar10_T4_w32_buf500_snn_r32",
     "linear": 48.43,
     "ncm_cosine": 62.82000000000001,
